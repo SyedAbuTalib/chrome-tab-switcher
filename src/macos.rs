@@ -16,11 +16,14 @@ use image::{ImageBuffer, Rgba};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
+use parking_lot::RwLock;
 
 use crate::hotkey::HotkeyEvent;
 
 static STATUS_BAR_HOTKEY_TX: OnceLock<Sender<HotkeyEvent>> = OnceLock::new();
 static PANEL_WINDOW_PTR: AtomicUsize = AtomicUsize::new(0);
+static VISIBLE_PANEL_FRAME: RwLock<Option<ScreenRect>> = RwLock::new(None);
+static ACTIVE_CARD_HEIGHT: AtomicUsize = AtomicUsize::new(492);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenRect {
@@ -285,6 +288,7 @@ pub fn configure_floating_panel() {
 
 /// Hide the floating panel immediately without destroying the GPUI window or Metal context.
 pub fn hide_floating_panel() {
+    *VISIBLE_PANEL_FRAME.write() = None;
     unsafe {
         if let Some(window) = primary_panel_window() {
             let _: () = msg_send![window, setAlphaValue: 0.0f64];
@@ -299,6 +303,7 @@ pub fn show_floating_panel(panel_width: f64, panel_height: f64) {
         if let Some(window) = primary_panel_window() {
             let screen_rect = active_mouse_screen_rect();
             let target = compute_panel_frame_in_screen(screen_rect, panel_width, panel_height);
+            *VISIBLE_PANEL_FRAME.write() = Some(target);
             let ns_rect = NSRect::new(
                 NSPoint::new(target.x, target.y),
                 NSSize::new(target.width, target.height),
@@ -316,12 +321,48 @@ pub fn update_floating_panel_size(panel_width: f64, panel_height: f64) {
         if let Some(window) = primary_panel_window() {
             let screen_rect = active_mouse_screen_rect();
             let target = compute_panel_frame_in_screen(screen_rect, panel_width, panel_height);
+            *VISIBLE_PANEL_FRAME.write() = Some(target);
             let ns_rect = NSRect::new(
                 NSPoint::new(target.x, target.y),
                 NSSize::new(target.width, target.height),
             );
             let _: () = msg_send![window, setFrame: ns_rect display: YES];
         }
+    }
+}
+
+/// Record the rendered height of the visible switcher card inside the GPUI window so clicks in
+/// empty space below a shorter card are also treated as outside clicks.
+pub fn set_active_card_height(card_height: f64) {
+    ACTIVE_CARD_HEIGHT.store(card_height.round().max(1.0) as usize, Ordering::Release);
+}
+
+/// Compute the AppKit screen rectangle of the top-anchored switcher card within `window_rect`.
+pub fn active_card_rect_in_window(window_rect: ScreenRect, card_height: f64) -> ScreenRect {
+    let clamped_h = card_height.clamp(1.0, window_rect.height);
+    let top = window_rect.y + window_rect.height;
+    ScreenRect {
+        x: window_rect.x,
+        y: top - clamped_h,
+        width: window_rect.width,
+        height: clamped_h,
+    }
+}
+
+pub fn is_point_in_rect(x: f64, y: f64, rect: ScreenRect) -> bool {
+    x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
+}
+
+/// Returns `true` if the current global mouse location is inside the visible switcher card.
+pub fn is_mouse_inside_floating_panel() -> bool {
+    let Some(window_rect) = *VISIBLE_PANEL_FRAME.read() else {
+        return false;
+    };
+    let card_h = ACTIVE_CARD_HEIGHT.load(Ordering::Acquire) as f64;
+    let card_rect = active_card_rect_in_window(window_rect, card_h);
+    unsafe {
+        let mouse_loc: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        is_point_in_rect(mouse_loc.x, mouse_loc.y, card_rect)
     }
 }
 
@@ -502,5 +543,27 @@ mod tests {
         // Some pixels along the front card border must be opaque
         let has_opaque = rgba.pixels().any(|p| p[3] > 200);
         assert!(has_opaque);
+    }
+
+    #[test]
+    fn computes_top_anchored_card_bounds_for_outside_click_detection() {
+        let win = ScreenRect {
+            x: 300.0,
+            y: 400.0,
+            width: 864.0,
+            height: 492.0,
+        };
+        // When card height is shorter (e.g. 276px for 1 row), it hangs down from top (400 + 492 = 892)
+        let card = active_card_rect_in_window(win, 276.0);
+        assert_eq!(card.x, 300.0);
+        assert_eq!(card.y, 892.0 - 276.0);
+        assert_eq!(card.height, 276.0);
+
+        // Point inside the top card is inside
+        assert!(is_point_in_rect(500.0, 750.0, card));
+        // Point in the empty space below the 1-row card (e.g. y = 500) is outside
+        assert!(!is_point_in_rect(500.0, 500.0, card));
+        // Point to the left of the panel is outside
+        assert!(!is_point_in_rect(100.0, 750.0, card));
     }
 }

@@ -32,9 +32,12 @@ pub const FLAG_MASK_CONTROL: u64 = 1 << 18;
 pub const FLAG_MASK_ALTERNATE: u64 = 1 << 19;
 pub const FLAG_MASK_COMMAND: u64 = 1 << 20;
 
+const CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
+const CG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
 const CG_EVENT_KEY_DOWN: u32 = 10;
 const CG_EVENT_KEY_UP: u32 = 11;
 const CG_EVENT_FLAGS_CHANGED: u32 = 12;
+const CG_EVENT_OTHER_MOUSE_DOWN: u32 = 25;
 const CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 const CG_EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 
@@ -351,6 +354,19 @@ extern "C" fn event_tap_callback(
         return event;
     }
 
+    let is_mouse_down = event_type == CG_EVENT_LEFT_MOUSE_DOWN
+        || event_type == CG_EVENT_RIGHT_MOUSE_DOWN
+        || event_type == CG_EVENT_OTHER_MOUSE_DOWN;
+    if is_mouse_down {
+        if ctx.switcher_visible.load(Ordering::Acquire)
+            && !crate::macos::is_mouse_inside_floating_panel()
+        {
+            ctx.switcher_visible.store(false, Ordering::Release);
+            let _ = ctx.tx.try_send(HotkeyEvent::Cancel);
+        }
+        return event;
+    }
+
     let is_key_down = event_type == CG_EVENT_KEY_DOWN;
     let is_key_up = event_type == CG_EVENT_KEY_UP;
     let is_flags_changed = event_type == CG_EVENT_FLAGS_CHANGED;
@@ -426,7 +442,10 @@ pub fn spawn_hotkey_tap_thread(
 
             let event_mask: u64 = (1u64 << CG_EVENT_KEY_DOWN)
                 | (1u64 << CG_EVENT_KEY_UP)
-                | (1u64 << CG_EVENT_FLAGS_CHANGED);
+                | (1u64 << CG_EVENT_FLAGS_CHANGED)
+                | (1u64 << CG_EVENT_LEFT_MOUSE_DOWN)
+                | (1u64 << CG_EVENT_RIGHT_MOUSE_DOWN)
+                | (1u64 << CG_EVENT_OTHER_MOUSE_DOWN);
 
             let mut logged_waiting = false;
             let tap_port = loop {

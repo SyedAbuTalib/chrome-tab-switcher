@@ -405,6 +405,7 @@ impl Render for SwitcherView {
         let selected_index = self.controller.selected_index;
 
         let card_height = compute_panel_height_for_mode(match_count, compact_mode);
+        macos::set_active_card_height(card_height);
         let viewport_height = (card_height - HEADER_HEIGHT).max(0.0) as f32;
 
         let header = div()
