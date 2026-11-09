@@ -93,7 +93,6 @@ fn main() {
     // 5. Launch GPUI in Accessory mode with a pre-warmed, non-activating floating panel and menu bar icon.
     Application::new().run(move |cx: &mut App| {
         macos::set_accessory_activation_policy();
-        macos::install_status_bar_item(hotkey_tx_menu.clone());
         open_prewarmed_switcher_window(
             cx,
             store.clone(),
@@ -102,5 +101,6 @@ fn main() {
             hotkey_rx.clone(),
             store_event_rx.clone(),
         );
+        macos::install_status_bar_item(hotkey_tx_menu.clone());
     });
 }

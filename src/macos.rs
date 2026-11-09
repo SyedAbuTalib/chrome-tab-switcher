@@ -3,6 +3,7 @@
 use std::ffi::CStr;
 use std::io::Cursor;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSScreen, NSStatusBar,
@@ -19,6 +20,7 @@ use objc::{class, msg_send, sel, sel_impl};
 use crate::hotkey::HotkeyEvent;
 
 static STATUS_BAR_HOTKEY_TX: OnceLock<Sender<HotkeyEvent>> = OnceLock::new();
+static PANEL_WINDOW_PTR: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenRect {
@@ -386,17 +388,34 @@ pub fn activate_chrome_application() -> bool {
 }
 
 unsafe fn primary_panel_window() -> Option<id> {
+    let cached = PANEL_WINDOW_PTR.load(Ordering::Acquire);
+    if cached != 0 {
+        return Some(cached as id);
+    }
+
     unsafe {
         let app = NSApp();
         if app == nil {
             return None;
         }
         let windows: id = msg_send![app, windows];
-        if windows == nil || NSArray::count(windows) == 0 {
+        if windows == nil {
             return None;
         }
-        let win = NSArray::objectAtIndex(windows, 0);
-        if win == nil { None } else { Some(win) }
+        let count = NSArray::count(windows);
+        for i in 0..count {
+            let win = NSArray::objectAtIndex(windows, i);
+            if win == nil {
+                continue;
+            }
+            // Skip tiny system windows such as NSStatusBarWindow (which is ~24px wide)
+            let frame: NSRect = msg_send![win, frame];
+            if frame.size.width >= 400.0 {
+                PANEL_WINDOW_PTR.store(win as usize, Ordering::Release);
+                return Some(win);
+            }
+        }
+        None
     }
 }
 
