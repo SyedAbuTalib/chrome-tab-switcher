@@ -55,11 +55,16 @@ Switch between your Most Recently Used (MRU) Chrome tabs from **any macOS applic
 | **`Space`** *(while holding `⌘`)* | Cycling → Search | Latch into Search mode (releasing `⌘` will **not** close the window) |
 | **`⌥` + `` ` ``** | Global | Open switcher directly in latched Search mode |
 | **Type any character** | Cycling / Search | Filter tabs via fuzzy search & auto-switch to **Compact List** view |
+| **`⌫`** | Cycling / Search | Delete the last character of the query |
+| **`⌥` + `⌫`** | Cycling / Search | Delete the last word of the query |
+| **`⌘` + `⌫`** | Cycling / Search | Clear the entire query |
+| **`⌘` + `V`** | Cycling / Search | Paste clipboard text into the query (pasted URLs are matched against the cleaned tab URL) |
 | **`←` / `→` / `Tab` / `⇧Tab`** | Grid / Search | Move selection by 1 card/row |
 | **`↓` / `↑`** | Grid / Search | Move down/up 1 full row (`±3` cards in Grid mode, `±1` row in Compact Search mode) |
 | **Two-finger Trackpad Scroll** | Grid / Search | Continuously scroll through all open tabs |
 | **Click any Card / Row** | Grid / Search | Immediately switch to the clicked tab |
 | **`↵ Return`** | Search / Cycling | Switch to the highlighted tab |
+| **`↵ Return`** *(no matching tab)* | Search | Open the query in a **new Chrome tab**: URL-like queries (`github.com/foo`, `localhost:3000`, `https://…`) are navigated to; anything else is searched with your default search engine. Prefix with `?` to force a search. |
 | **`Esc`** | Any | Cancel and hide the switcher |
 
 ---
@@ -101,7 +106,7 @@ To run a live auto-rebuilding development loop whenever you edit files in `src/`
 ### Running Tests
 
 ```zsh
-# Run all 25 Rust unit & integration tests
+# Run all 34 Rust unit & integration tests
 cargo test
 
 # Run the Chrome MV3 extension unit tests

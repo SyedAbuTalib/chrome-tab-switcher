@@ -26,6 +26,7 @@ pub const KEYCODE_ANSI_Q: u16 = 12;
 pub const KEYCODE_ANSI_W: u16 = 13;
 pub const KEYCODE_ANSI_N: u16 = 45;
 pub const KEYCODE_ANSI_P: u16 = 35;
+pub const KEYCODE_ANSI_V: u16 = 9;
 
 pub const FLAG_MASK_SHIFT: u64 = 1 << 17;
 pub const FLAG_MASK_CONTROL: u64 = 1 << 18;
@@ -88,6 +89,13 @@ pub enum HotkeyEvent {
     ModifierReleased,
     CharInput(char),
     Backspace,
+    /// `⌥⌫` — delete the trailing word of the query (macOS `deleteWordBackward:`).
+    BackspaceWord,
+    /// `⌘⌫` — clear the entire query (macOS `deleteToBeginningOfLine:`).
+    BackspaceLine,
+    /// `⌘V` — paste the general pasteboard into the query. The tap only signals intent;
+    /// the clipboard is read on the GPUI thread in `SwitcherView::dispatch_hotkey`.
+    Paste,
     NavigateLeft,
     NavigateRight,
     NavigateUp,
@@ -240,9 +248,21 @@ pub fn classify_key_event(
                 HotkeyEvent::NavigateRight
             }),
         },
+        // Modifier-aware backspace mirrors the Cocoa text system: ⌘⌫ clears the line,
+        // ⌥⌫ deletes a word, bare ⌫ deletes one character.
         KEYCODE_DELETE => TapDecision {
             intercept: true,
-            emit: Some(HotkeyEvent::Backspace),
+            emit: Some(if cmd_is_down {
+                HotkeyEvent::BackspaceLine
+            } else if alt_is_down {
+                HotkeyEvent::BackspaceWord
+            } else {
+                HotkeyEvent::Backspace
+            }),
+        },
+        KEYCODE_ANSI_V if cmd_is_down && !ctrl_is_down && !alt_is_down => TapDecision {
+            intercept: true,
+            emit: Some(HotkeyEvent::Paste),
         },
         KEYCODE_ANSI_N if ctrl_is_down => TapDecision {
             intercept: true,
@@ -661,6 +681,118 @@ mod tests {
             TapDecision {
                 intercept: true,
                 emit: Some(HotkeyEvent::Cancel)
+            }
+        );
+    }
+
+    #[test]
+    fn routes_modified_backspace_and_cmd_v_to_text_editing_events() {
+        let mut cmd_down = false;
+        let intercepted = |emit: HotkeyEvent| TapDecision {
+            intercept: true,
+            emit: Some(emit),
+        };
+
+        // Bare ⌫ still deletes a single character
+        assert_eq!(
+            classify_key_event(KEYCODE_DELETE, 0, true, false, &mut cmd_down, true, None),
+            intercepted(HotkeyEvent::Backspace)
+        );
+        // ⌥⌫ deletes a word, ⌘⌫ clears the line (⌘ wins if both are held)
+        assert_eq!(
+            classify_key_event(
+                KEYCODE_DELETE,
+                FLAG_MASK_ALTERNATE,
+                true,
+                false,
+                &mut cmd_down,
+                true,
+                None
+            ),
+            intercepted(HotkeyEvent::BackspaceWord)
+        );
+        assert_eq!(
+            classify_key_event(
+                KEYCODE_DELETE,
+                FLAG_MASK_COMMAND,
+                true,
+                false,
+                &mut cmd_down,
+                true,
+                None
+            ),
+            intercepted(HotkeyEvent::BackspaceLine)
+        );
+        assert_eq!(
+            classify_key_event(
+                KEYCODE_DELETE,
+                FLAG_MASK_COMMAND | FLAG_MASK_ALTERNATE,
+                true,
+                false,
+                &mut cmd_down,
+                true,
+                None
+            ),
+            intercepted(HotkeyEvent::BackspaceLine)
+        );
+
+        // ⌘V pastes; a plain `v` still types into the query
+        assert_eq!(
+            classify_key_event(
+                KEYCODE_ANSI_V,
+                FLAG_MASK_COMMAND,
+                true,
+                false,
+                &mut cmd_down,
+                true,
+                Some('v')
+            ),
+            intercepted(HotkeyEvent::Paste)
+        );
+        assert_eq!(
+            classify_key_event(
+                KEYCODE_ANSI_V,
+                0,
+                true,
+                false,
+                &mut cmd_down,
+                true,
+                Some('v')
+            ),
+            intercepted(HotkeyEvent::CharInput('v'))
+        );
+
+        // When the switcher is hidden, ⌘V and ⌘⌫ pass through to the frontmost app untouched
+        for flags in [FLAG_MASK_COMMAND, FLAG_MASK_ALTERNATE] {
+            assert_eq!(
+                classify_key_event(
+                    KEYCODE_DELETE,
+                    flags,
+                    true,
+                    false,
+                    &mut cmd_down,
+                    false,
+                    None
+                ),
+                TapDecision {
+                    intercept: false,
+                    emit: None
+                }
+            );
+        }
+        assert_eq!(
+            classify_key_event(
+                KEYCODE_ANSI_V,
+                FLAG_MASK_COMMAND,
+                true,
+                false,
+                &mut cmd_down,
+                false,
+                Some('v')
+            ),
+            TapDecision {
+                intercept: false,
+                emit: None
             }
         );
     }

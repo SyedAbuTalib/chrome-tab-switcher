@@ -58,6 +58,14 @@ pub enum DaemonToExtension {
         window_id: i64,
         tab_id: i64,
     },
+    /// Open `url` in a new foreground tab (Enter on a search with no matching tab).
+    OpenUrl {
+        url: String,
+    },
+    /// Search `text` with the user's default search engine in a new tab (`chrome.search.query`).
+    SearchWeb {
+        text: String,
+    },
     Pong,
 }
 
@@ -149,5 +157,21 @@ mod tests {
         let pong = DaemonToExtension::Pong;
         let pong_json = serde_json::to_value(&pong).unwrap();
         assert_eq!(pong_json, serde_json::json!({ "type": "pong" }));
+
+        let open_url = DaemonToExtension::OpenUrl {
+            url: "https://github.com/org/repo".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&open_url).unwrap(),
+            serde_json::json!({ "type": "open_url", "url": "https://github.com/org/repo" })
+        );
+
+        let search_web = DaemonToExtension::SearchWeb {
+            text: "rust gpui docs".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&search_web).unwrap(),
+            serde_json::json!({ "type": "search_web", "text": "rust gpui docs" })
+        );
     }
 }

@@ -220,3 +220,103 @@ test("createBridgeController sends snapshot on connect, deltas on events, and ha
     { windowId: 10, props: { focused: true, drawAttention: false } },
   ]);
 });
+
+test("open_url and search_web open a new tab, preferring chrome.search for the default engine", async () => {
+  const createdTabs = [];
+  const searchQueries = [];
+  let wsInstance = null;
+  const noopEvent = { addListener: () => {} };
+
+  const makeChrome = ({ withSearchApi }) => ({
+    storage: {
+      local: {
+        get: async () => ({ profile_id: "prof-uuid-1", profile_name: "Work" }),
+        set: async () => {},
+      },
+    },
+    tabs: {
+      query: async () => [],
+      update: async () => {},
+      create: async (props) => {
+        createdTabs.push(props);
+      },
+      onCreated: noopEvent,
+      onUpdated: noopEvent,
+      onRemoved: noopEvent,
+      onActivated: noopEvent,
+    },
+    windows: {
+      WINDOW_ID_NONE: -1,
+      update: async () => {},
+      onFocusChanged: noopEvent,
+      onRemoved: noopEvent,
+    },
+    ...(withSearchApi
+      ? {
+          search: {
+            query: async (props) => {
+              searchQueries.push(props);
+            },
+          },
+        }
+      : {}),
+  });
+
+  class MockWebSocket {
+    static OPEN = 1;
+    constructor() {
+      this.readyState = MockWebSocket.OPEN;
+      wsInstance = this;
+    }
+    send() {}
+    close() {}
+  }
+
+  const send = (payload) =>
+    wsInstance.onmessage({ data: JSON.stringify(payload) });
+
+  // With chrome.search available: URLs go to tabs.create, searches to search.query
+  const withSearch = createBridgeController({
+    chromeApi: makeChrome({ withSearchApi: true }),
+    WebSocketImpl: MockWebSocket,
+    enableKeepaliveTimer: false,
+  });
+  await withSearch.start();
+  await wsInstance.onopen();
+
+  await send({ type: "open_url", url: "https://github.com/org/repo" });
+  assert.deepEqual(createdTabs, [
+    { url: "https://github.com/org/repo", active: true },
+  ]);
+
+  await send({ type: "search_web", text: "rust gpui docs" });
+  assert.deepEqual(searchQueries, [
+    { text: "rust gpui docs", disposition: "NEW_TAB" },
+  ]);
+  assert.equal(createdTabs.length, 1);
+
+  // Malformed payloads are ignored
+  await send({ type: "open_url", url: "" });
+  await send({ type: "search_web", text: "   " });
+  await send({ type: "open_url" });
+  assert.equal(createdTabs.length, 1);
+  assert.equal(searchQueries.length, 1);
+
+  // Without chrome.search (older Chrome / other browsers): fall back to a Google search tab
+  createdTabs.length = 0;
+  const withoutSearch = createBridgeController({
+    chromeApi: makeChrome({ withSearchApi: false }),
+    WebSocketImpl: MockWebSocket,
+    enableKeepaliveTimer: false,
+  });
+  await withoutSearch.start();
+  await wsInstance.onopen();
+
+  await send({ type: "search_web", text: "zebra quokka" });
+  assert.deepEqual(createdTabs, [
+    {
+      url: "https://www.google.com/search?q=zebra%20quokka",
+      active: true,
+    },
+  ]);
+});

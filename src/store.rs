@@ -258,6 +258,15 @@ impl TabStore {
         entries
     }
 
+    /// Profile that owns the most recently used tab — the natural place to open a new tab
+    /// when a search matches nothing. `None` until the first snapshot arrives.
+    pub fn most_recent_profile_id(&self) -> Option<String> {
+        self.tabs
+            .values()
+            .min_by(|a, b| compare_mru(a, b))
+            .map(|entry| entry.key.profile_id.clone())
+    }
+
     pub fn query(&mut self, query_str: &str) -> Vec<ScoredTab> {
         let mru_entries = self.mru_sorted_entries();
         let badges = self.compute_window_badges();
@@ -512,6 +521,8 @@ mod tests {
         });
 
         assert_eq!(store.len(), 2);
+        // p2's tab was accessed most recently (200 > 100), so new tabs should open in p2
+        assert_eq!(store.most_recent_profile_id().as_deref(), Some("p2"));
 
         // Activate tab 10 in p1 at timestamp 500.0 -> should move to rank 0
         store.apply(ExtensionToDaemon::TabActivated {
@@ -526,6 +537,7 @@ mod tests {
         assert_eq!(results[0].entry.title, "Personal Mail");
         assert!(results[0].entry.active);
         assert!(results[0].badge_label.contains("Personal"));
+        assert_eq!(store.most_recent_profile_id().as_deref(), Some("p1"));
 
         // Upsert new tab in p2
         store.apply(ExtensionToDaemon::TabUpserted {
@@ -533,6 +545,7 @@ mod tests {
             tab: sample_wire_tab(11, 2, 0, "PR #421", "https://github.com/pr/421", Some(600.0)),
         });
         assert_eq!(store.len(), 3);
+        assert_eq!(store.most_recent_profile_id().as_deref(), Some("p2"));
 
         // Remove tab 10 from p1 only; p2's tab 10 must remain intact
         store.apply(ExtensionToDaemon::TabRemoved {

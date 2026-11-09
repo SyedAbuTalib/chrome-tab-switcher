@@ -390,6 +390,31 @@ pub fn is_chrome_frontmost() -> bool {
     }
 }
 
+/// Read the plain-text contents of the general `NSPasteboard` (`⌘V` source), if any.
+///
+/// Must be called on the main thread; the returned `NSString` is autoreleased and copied out
+/// immediately so no AppKit object outlives the current run-loop pass.
+pub fn read_general_pasteboard_string() -> Option<String> {
+    unsafe {
+        let pasteboard: id = msg_send![class!(NSPasteboard), generalPasteboard];
+        if pasteboard == nil {
+            return None;
+        }
+        // NSPasteboardTypeString
+        let plain_text_type = NSString::alloc(nil).init_str("public.utf8-plain-text");
+        let ns_string: id = msg_send![pasteboard, stringForType: plain_text_type];
+        let _: () = msg_send![plain_text_type, release];
+        if ns_string == nil {
+            return None;
+        }
+        let utf8_ptr: *const libc::c_char = msg_send![ns_string, UTF8String];
+        if utf8_ptr.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr(utf8_ptr).to_string_lossy().into_owned())
+    }
+}
+
 /// Bring Google Chrome to the foreground immediately via `NSRunningApplication`.
 pub fn activate_chrome_application() -> bool {
     const CHROME_BUNDLE_IDS: &[&str] = &[

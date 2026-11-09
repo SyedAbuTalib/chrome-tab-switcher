@@ -265,6 +265,35 @@ export function createBridgeController({
       } catch (_err) {
         // Tab or window may have been closed concurrently.
       }
+      return;
+    }
+
+    // Daemon found no open tab for the user's query: open it in a new tab instead.
+    if (msg.type === "open_url") {
+      if (typeof msg.url !== "string" || msg.url.length === 0) return;
+      try {
+        await chromeApi.tabs.create({ url: msg.url, active: true });
+      } catch (_err) {
+        // Invalid URL or no window available.
+      }
+      return;
+    }
+
+    if (msg.type === "search_web") {
+      if (typeof msg.text !== "string" || msg.text.trim().length === 0) return;
+      try {
+        if (chromeApi.search && typeof chromeApi.search.query === "function") {
+          // Uses the user's default search engine (requires the "search" permission).
+          await chromeApi.search.query({ text: msg.text, disposition: "NEW_TAB" });
+        } else {
+          await chromeApi.tabs.create({
+            url: `https://www.google.com/search?q=${encodeURIComponent(msg.text)}`,
+            active: true,
+          });
+        }
+      } catch (_err) {
+        // Search API unavailable or no window available.
+      }
     }
   }
 

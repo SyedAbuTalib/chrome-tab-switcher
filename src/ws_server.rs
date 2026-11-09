@@ -79,6 +79,41 @@ impl WsBridgeHandle {
         }
         sent_any
     }
+
+    /// Open `url` in a new foreground tab in `profile_id`'s Chrome (or any connected profile).
+    pub fn open_url(&self, profile_id: Option<&str>, url: &str) -> bool {
+        self.send_to_one_connection(
+            profile_id,
+            DaemonToExtension::OpenUrl {
+                url: url.to_string(),
+            },
+        )
+    }
+
+    /// Search `text` with Chrome's default search engine in a new tab of `profile_id`'s Chrome.
+    pub fn search_web(&self, profile_id: Option<&str>, text: &str) -> bool {
+        self.send_to_one_connection(
+            profile_id,
+            DaemonToExtension::SearchWeb {
+                text: text.to_string(),
+            },
+        )
+    }
+
+    /// Deliver `cmd` to exactly one extension connection — the given profile's if it is
+    /// connected, otherwise any live one. Unlike `activate_tab`, this must never broadcast:
+    /// opening a tab in every connected profile at once would be the wrong result.
+    fn send_to_one_connection(&self, profile_id: Option<&str>, cmd: DaemonToExtension) -> bool {
+        let reg = self.registry.read();
+        if let Some((_, tx)) = profile_id.and_then(|pid| reg.by_profile.get(pid))
+            && tx.send(cmd.clone()).is_ok()
+        {
+            return true;
+        }
+        reg.by_conn_id
+            .values()
+            .any(|tx| tx.send(cmd.clone()).is_ok())
+    }
 }
 
 pub fn spawn_ws_server_thread(
@@ -394,5 +429,29 @@ mod tests {
         // Verify tab 102 is now rank 0 in store
         let ranked = store.write().query("");
         assert_eq!(ranked[0].entry.key.tab_id, 102);
+
+        // 4. No-match fallbacks: open_url targets the profile's connection; search_web with an
+        //    unknown profile still reaches the (single) live connection instead of being dropped.
+        assert!(handle.open_url(Some("prof-test"), "https://github.com/org/repo"));
+        let open_msg = ws_stream.next().await.unwrap().unwrap();
+        let parsed_open: DaemonToExtension =
+            serde_json::from_str(open_msg.to_text().unwrap()).unwrap();
+        assert_eq!(
+            parsed_open,
+            DaemonToExtension::OpenUrl {
+                url: "https://github.com/org/repo".into()
+            }
+        );
+
+        assert!(handle.search_web(None, "rust gpui docs"));
+        let search_msg = ws_stream.next().await.unwrap().unwrap();
+        let parsed_search: DaemonToExtension =
+            serde_json::from_str(search_msg.to_text().unwrap()).unwrap();
+        assert_eq!(
+            parsed_search,
+            DaemonToExtension::SearchWeb {
+                text: "rust gpui docs".into()
+            }
+        );
     }
 }

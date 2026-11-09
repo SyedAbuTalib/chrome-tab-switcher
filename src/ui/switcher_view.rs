@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use crate::favicon::FaviconService;
 use crate::hotkey::HotkeyEvent;
 use crate::macos;
-use crate::store::{ScoredTab, TabEntry, TabStore};
+use crate::store::{ScoredTab, TabEntry, TabStore, clean_display_url};
 use crate::ui::row::{compute_scrollbar_metrics, render_compact_tab_row, render_tab_row};
 use crate::ui::{
     COMPACT_PADDING_Y, COMPACT_ROW_HEIGHT, EMPTY_STATE_HEIGHT, GRID_COLUMNS, GRID_GAP,
@@ -31,7 +31,138 @@ pub enum SwitcherOutcome {
     NoOp,
     ShowOrUpdate,
     CommitSelected(TabEntry),
+    /// Enter on a search that matched no open tab: open the query in a new Chrome tab instead.
+    OpenInNewTab(OpenTarget),
     CancelAndHide,
+}
+
+/// What a no-match query should turn into when the user presses Enter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenTarget {
+    /// Navigate a new tab to this fully-qualified URL.
+    Url(String),
+    /// Search this text with Chrome's default search engine.
+    WebSearch(String),
+}
+
+/// Decide whether a no-match query should be navigated to or searched for, roughly the way the
+/// omnibox does: a leading `?` forces a search, anything with whitespace is a search, explicit
+/// schemes (`https://`, `chrome://`, `about:`) are URLs, and bare `host[:port][/path]` forms
+/// (`github.com/foo`, `docs.rs`, `localhost:3000`, `192.168.0.1`) get a scheme prepended.
+pub fn resolve_open_target(query: &str) -> Option<OpenTarget> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(forced) = trimmed.strip_prefix('?') {
+        let forced = forced.trim();
+        return (!forced.is_empty()).then(|| OpenTarget::WebSearch(forced.to_string()));
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Some(OpenTarget::WebSearch(trimmed.to_string()));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if has_url_scheme(&lower) || lower.starts_with("about:") {
+        return Some(OpenTarget::Url(trimmed.to_string()));
+    }
+
+    let authority = trimmed.split(['/', '?', '#']).next().unwrap_or_default();
+    if looks_like_authority(authority) {
+        let host = authority.split(':').next().unwrap_or_default();
+        let scheme = if host.eq_ignore_ascii_case("localhost") || is_ipv4_literal(host) {
+            "http://"
+        } else {
+            "https://"
+        };
+        return Some(OpenTarget::Url(format!("{scheme}{trimmed}")));
+    }
+
+    Some(OpenTarget::WebSearch(trimmed.to_string()))
+}
+
+/// `scheme://rest` with an RFC 3986 scheme (`https`, `chrome`, `file`, `chrome-extension`, …).
+fn has_url_scheme(lower: &str) -> bool {
+    match lower.split_once("://") {
+        Some((scheme, rest)) => {
+            !rest.is_empty()
+                && scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        }
+        None => false,
+    }
+}
+
+fn is_ipv4_literal(host: &str) -> bool {
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets
+            .iter()
+            .all(|octet| !octet.is_empty() && octet.parse::<u8>().is_ok())
+}
+
+/// `host[:port]` where host is `localhost`, an IPv4 literal, or a dotted domain whose last
+/// label is alphabetic and at least two characters (so `v1.2` and `foo.b` stay searches).
+fn looks_like_authority(authority: &str) -> bool {
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if let Some(port) = port
+        && (port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    if host.eq_ignore_ascii_case("localhost") || is_ipv4_literal(host) {
+        return true;
+    }
+
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    let is_dns_label = |label: &str| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
+    if !labels.iter().all(|label| is_dns_label(label)) {
+        return false;
+    }
+    let tld = labels[labels.len() - 1];
+    tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+}
+
+/// Upper bound on pasted query length so a stray multi-KB clipboard can't stall the matcher.
+pub const MAX_PASTE_CHARS: usize = 256;
+
+/// Delete the trailing word of a cursor-less query, mirroring macOS `deleteWordBackward:`:
+/// trailing whitespace/punctuation is removed first, then the alphanumeric run before it.
+///
+/// `"hello world"` → `"hello "`, `"github.com/foo"` → `"github.com/"`, `"!youtube"` → `"!"`.
+pub fn delete_word_backward(query: &mut String) {
+    while query.ends_with(|ch: char| !ch.is_alphanumeric()) {
+        query.pop();
+    }
+    while query.ends_with(char::is_alphanumeric) {
+        query.pop();
+    }
+}
+
+/// Normalize clipboard text into a fuzzy-search query: collapse all whitespace runs (including
+/// newlines) to single spaces, strip the scheme / `www.` / trailing slash from pasted URLs so
+/// they match the way tab URLs are indexed, and cap the length at [`MAX_PASTE_CHARS`].
+pub fn normalize_pasted_text(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = if collapsed.starts_with("http://") || collapsed.starts_with("https://") {
+        clean_display_url(&collapsed)
+    } else {
+        collapsed
+    };
+    normalized.chars().take(MAX_PASTE_CHARS).collect()
 }
 
 pub struct SwitcherController {
@@ -72,6 +203,34 @@ impl SwitcherController {
         } else if self.selected_index >= self.matches.len() {
             self.selected_index = self.matches.len() - 1;
         }
+    }
+
+    /// Profile that should receive a new tab opened from a no-match search.
+    pub fn most_recent_profile_id(&self) -> Option<String> {
+        self.store.read().most_recent_profile_id()
+    }
+
+    /// Apply an edit to the query, latch into Search mode (so releasing `⌘` keeps the window
+    /// open), and reset the selection to the top match.
+    fn edit_query(&mut self, edit: impl FnOnce(&mut String)) -> SwitcherOutcome {
+        self.mode = Mode::LatchedSearch;
+        edit(&mut self.query);
+        self.selected_index = 0;
+        self.refresh_matches();
+        SwitcherOutcome::ShowOrUpdate
+    }
+
+    /// Insert pasted clipboard text (`⌘V`) into the query. Resolved by the view layer, which
+    /// owns the pasteboard read; this keeps the state machine pure and unit-testable.
+    pub fn insert_text(&mut self, text: &str) -> SwitcherOutcome {
+        if self.mode == Mode::Hidden {
+            return SwitcherOutcome::NoOp;
+        }
+        let normalized = normalize_pasted_text(text);
+        if normalized.is_empty() {
+            return SwitcherOutcome::NoOp;
+        }
+        self.edit_query(|query| query.push_str(&normalized))
     }
 
     pub fn handle_hotkey(
@@ -143,13 +302,13 @@ impl SwitcherController {
                     self.refresh_matches();
                     SwitcherOutcome::ShowOrUpdate
                 }
-                HotkeyEvent::Backspace => {
-                    self.mode = Mode::LatchedSearch;
-                    self.query.pop();
-                    self.selected_index = 0;
-                    self.refresh_matches();
-                    SwitcherOutcome::ShowOrUpdate
-                }
+                HotkeyEvent::Backspace => self.edit_query(|query| {
+                    query.pop();
+                }),
+                HotkeyEvent::BackspaceWord => self.edit_query(delete_word_backward),
+                HotkeyEvent::BackspaceLine => self.edit_query(String::clear),
+                // Clipboard is read by `SwitcherView::dispatch_hotkey`, which calls `insert_text`.
+                HotkeyEvent::Paste => SwitcherOutcome::NoOp,
                 HotkeyEvent::Cancel => {
                     self.reset_to_hidden();
                     SwitcherOutcome::CancelAndHide
@@ -194,19 +353,25 @@ impl SwitcherController {
                     self.refresh_matches();
                     SwitcherOutcome::ShowOrUpdate
                 }
-                HotkeyEvent::Backspace => {
-                    self.query.pop();
-                    self.selected_index = 0;
-                    self.refresh_matches();
-                    SwitcherOutcome::ShowOrUpdate
-                }
+                HotkeyEvent::Backspace => self.edit_query(|query| {
+                    query.pop();
+                }),
+                HotkeyEvent::BackspaceWord => self.edit_query(delete_word_backward),
+                HotkeyEvent::BackspaceLine => self.edit_query(String::clear),
+                // Clipboard is read by `SwitcherView::dispatch_hotkey`, which calls `insert_text`.
+                HotkeyEvent::Paste => SwitcherOutcome::NoOp,
                 HotkeyEvent::Confirm => {
                     let chosen = self.matches.get(self.selected_index).map(|m| m.entry.clone());
+                    // No open tab matched: fall through to opening the query in a new tab.
+                    let fallback = chosen
+                        .is_none()
+                        .then(|| resolve_open_target(&self.query))
+                        .flatten();
                     self.reset_to_hidden();
-                    if let Some(tab) = chosen {
-                        SwitcherOutcome::CommitSelected(tab)
-                    } else {
-                        SwitcherOutcome::CancelAndHide
+                    match (chosen, fallback) {
+                        (Some(tab), _) => SwitcherOutcome::CommitSelected(tab),
+                        (None, Some(target)) => SwitcherOutcome::OpenInNewTab(target),
+                        (None, None) => SwitcherOutcome::CancelAndHide,
                     }
                 }
                 HotkeyEvent::Cancel => {
@@ -359,7 +524,15 @@ impl SwitcherView {
             false
         };
 
-        let outcome = self.controller.handle_hotkey(event, chrome_frontmost);
+        let outcome = match event {
+            // The event tap only signals paste intent; read the pasteboard here on the GPUI
+            // thread so the tap callback never blocks on an AppKit/XPC round-trip.
+            HotkeyEvent::Paste if !was_hidden => match macos::read_general_pasteboard_string() {
+                Some(text) => self.controller.insert_text(&text),
+                None => SwitcherOutcome::NoOp,
+            },
+            event => self.controller.handle_hotkey(event, chrome_frontmost),
+        };
         match outcome {
             SwitcherOutcome::NoOp => PanelWindowAction::None,
             SwitcherOutcome::ShowOrUpdate => {
@@ -376,6 +549,24 @@ impl SwitcherView {
                 self.switcher_visible_flag.store(false, Ordering::Release);
                 self.ws_handle
                     .activate_tab(&tab.key.profile_id, tab.window_id, tab.key.tab_id);
+                macos::activate_chrome_application();
+                cx.notify();
+                PanelWindowAction::Hide
+            }
+            SwitcherOutcome::OpenInNewTab(target) => {
+                self.switcher_visible_flag.store(false, Ordering::Release);
+                let profile_id = self.controller.most_recent_profile_id();
+                let delivered = match &target {
+                    OpenTarget::Url(url) => self.ws_handle.open_url(profile_id.as_deref(), url),
+                    OpenTarget::WebSearch(text) => {
+                        self.ws_handle.search_web(profile_id.as_deref(), text)
+                    }
+                };
+                if !delivered {
+                    log::warn!(
+                        "No Chrome extension connection to open {target:?} — is extension/ loaded?"
+                    );
+                }
                 macos::activate_chrome_application();
                 cx.notify();
                 PanelWindowAction::Hide
@@ -500,7 +691,11 @@ impl Render for SwitcherView {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(rgb(0x64748B))
-                                .child("· ↵ Switch · Esc Cancel"),
+                                .child(if match_count == 0 && total_tabs > 0 {
+                                    "· ↵ Open in new tab · Esc Cancel"
+                                } else {
+                                    "· ↵ Switch · Esc Cancel"
+                                }),
                         )
                     }),
             );
@@ -519,7 +714,17 @@ impl Render for SwitcherView {
                     "No Chrome tabs connected yet — load extension/ in chrome://extensions"
                         .to_string()
                 } else {
-                    format!("No matching Chrome tabs for \"{}\"", self.controller.query)
+                    match resolve_open_target(&self.controller.query) {
+                        Some(OpenTarget::Url(url)) => {
+                            format!("No matching tabs · ↵ Open {url} in a new tab")
+                        }
+                        Some(OpenTarget::WebSearch(text)) => {
+                            format!("No matching tabs · ↵ Search the web for \"{text}\"")
+                        }
+                        None => {
+                            format!("No matching Chrome tabs for \"{}\"", self.controller.query)
+                        }
+                    }
                 })
                 .into_any_element()
         } else if compact_mode {
@@ -906,5 +1111,249 @@ mod tests {
         assert_eq!(ctrl2.mode, Mode::LatchedSearch);
         assert_eq!(ctrl2.query, "");
         assert_eq!(ctrl2.selected_index, 0);
+    }
+
+    #[test]
+    fn delete_word_backward_mirrors_macos_delete_word_backward_semantics() {
+        let cases = [
+            ("hello world", "hello "),
+            ("hello world   ", "hello "),
+            ("github.com/foo", "github.com/"),
+            ("github.com/", "github."),
+            ("!youtube", "!"),
+            ("rust docs", "rust "),
+            ("foo", ""),
+            ("   ", ""),
+            ("", ""),
+        ];
+        for (input, expected) in cases {
+            let mut query = input.to_string();
+            delete_word_backward(&mut query);
+            assert_eq!(query, expected, "delete_word_backward({input:?})");
+        }
+    }
+
+    #[test]
+    fn option_backspace_deletes_word_and_cmd_backspace_clears_query() {
+        let store = seeded_store();
+        let mut ctrl = SwitcherController::new(store);
+
+        ctrl.handle_hotkey(HotkeyEvent::OpenLatchedSearch, false);
+        for ch in "rust docs".chars() {
+            ctrl.handle_hotkey(HotkeyEvent::CharInput(ch), false);
+        }
+        assert_eq!(ctrl.query, "rust docs");
+        assert!(ctrl.is_compact_search());
+        assert_eq!(ctrl.matches[0].entry.key.tab_id, 3);
+
+        // ⌥⌫ removes only the trailing word (leaving the separator, like macOS)
+        let word_out = ctrl.handle_hotkey(HotkeyEvent::BackspaceWord, false);
+        assert!(matches!(word_out, SwitcherOutcome::ShowOrUpdate));
+        assert_eq!(ctrl.query, "rust ");
+        assert_eq!(ctrl.mode, Mode::LatchedSearch);
+        assert_eq!(ctrl.selected_index, 0);
+        assert_eq!(ctrl.matches[0].entry.key.tab_id, 3);
+
+        // A second ⌥⌫ empties the query and drops back to the full MRU card grid
+        ctrl.handle_hotkey(HotkeyEvent::BackspaceWord, false);
+        assert_eq!(ctrl.query, "");
+        assert!(!ctrl.is_compact_search());
+        assert_eq!(ctrl.matches.len(), 3);
+
+        // ⌘⌫ clears a multi-word query in one keystroke without leaving Search mode
+        for ch in "git pr".chars() {
+            ctrl.handle_hotkey(HotkeyEvent::CharInput(ch), false);
+        }
+        assert_eq!(ctrl.matches[0].entry.key.tab_id, 2);
+        let line_out = ctrl.handle_hotkey(HotkeyEvent::BackspaceLine, false);
+        assert!(matches!(line_out, SwitcherOutcome::ShowOrUpdate));
+        assert_eq!(ctrl.query, "");
+        assert_eq!(ctrl.mode, Mode::LatchedSearch);
+        assert_eq!(ctrl.matches.len(), 3);
+
+        // From Cycling (⌘ still held from the summon), ⌘⌫ latches into Search like plain ⌫ does
+        let mut cycling = SwitcherController::new(seeded_store());
+        cycling.handle_hotkey(HotkeyEvent::CycleNext, true);
+        assert_eq!(cycling.mode, Mode::Cycling);
+        cycling.handle_hotkey(HotkeyEvent::BackspaceLine, true);
+        assert_eq!(cycling.mode, Mode::LatchedSearch);
+        assert_eq!(cycling.query, "");
+        let release_out = cycling.handle_hotkey(HotkeyEvent::ModifierReleased, true);
+        assert!(matches!(release_out, SwitcherOutcome::NoOp));
+    }
+
+    #[test]
+    fn normalize_pasted_text_collapses_whitespace_strips_url_scheme_and_caps_length() {
+        assert_eq!(
+            normalize_pasted_text("  Fix\tthe\r\n\nbug  "),
+            "Fix the bug"
+        );
+        assert_eq!(
+            normalize_pasted_text("https://www.github.com/org/repo/pull/421/\n"),
+            "github.com/org/repo/pull/421"
+        );
+        assert_eq!(normalize_pasted_text("http://example.com"), "example.com");
+        // Non-URL text that merely contains a scheme is left alone
+        assert_eq!(normalize_pasted_text("see https://x.y"), "see https://x.y");
+        assert_eq!(normalize_pasted_text("\n \t "), "");
+        let huge = "a".repeat(MAX_PASTE_CHARS * 4);
+        assert_eq!(
+            normalize_pasted_text(&huge).chars().count(),
+            MAX_PASTE_CHARS
+        );
+    }
+
+    #[test]
+    fn paste_inserts_normalized_clipboard_text_and_latches_compact_search() {
+        let store = seeded_store();
+        let mut ctrl = SwitcherController::new(store.clone());
+
+        // Pasting while Hidden is ignored (⌘V belongs to the frontmost app then anyway)
+        assert!(matches!(ctrl.insert_text("github"), SwitcherOutcome::NoOp));
+        assert_eq!(ctrl.mode, Mode::Hidden);
+        assert_eq!(ctrl.query, "");
+
+        // Summon with ⌘` then ⌘V a full URL copied from the address bar: the scheme is stripped so
+        // it fuzzy-matches the indexed display URL, and the switcher latches into compact search.
+        ctrl.handle_hotkey(HotkeyEvent::CycleNext, true);
+        assert_eq!(ctrl.mode, Mode::Cycling);
+        let paste_out = ctrl.insert_text("https://github.com/org/repo/pull/421\n");
+        assert!(matches!(paste_out, SwitcherOutcome::ShowOrUpdate));
+        assert_eq!(ctrl.mode, Mode::LatchedSearch);
+        assert!(ctrl.is_compact_search());
+        assert_eq!(ctrl.query, "github.com/org/repo/pull/421");
+        assert_eq!(ctrl.selected_index, 0);
+        assert_eq!(ctrl.matches[0].entry.key.tab_id, 2);
+
+        // Releasing ⌘ after a paste must not dismiss or commit
+        assert!(matches!(
+            ctrl.handle_hotkey(HotkeyEvent::ModifierReleased, true),
+            SwitcherOutcome::NoOp
+        ));
+        assert_eq!(ctrl.mode, Mode::LatchedSearch);
+
+        // Whitespace-only clipboard is a no-op and leaves the query untouched
+        assert!(matches!(ctrl.insert_text("  \n"), SwitcherOutcome::NoOp));
+        assert_eq!(ctrl.query, "github.com/org/repo/pull/421");
+
+        // Paste appends to an existing query rather than replacing it
+        let mut ctrl2 = SwitcherController::new(store);
+        ctrl2.handle_hotkey(HotkeyEvent::OpenLatchedSearch, false);
+        ctrl2.handle_hotkey(HotkeyEvent::CharInput('r'), false);
+        ctrl2.insert_text("ust");
+        assert_eq!(ctrl2.query, "rust");
+        assert_eq!(ctrl2.matches[0].entry.key.tab_id, 3);
+
+        // The raw `Paste` event is resolved by the view layer; the pure controller treats it as a no-op
+        assert!(matches!(
+            ctrl2.handle_hotkey(HotkeyEvent::Paste, false),
+            SwitcherOutcome::NoOp
+        ));
+        assert_eq!(ctrl2.query, "rust");
+    }
+
+    #[test]
+    fn resolve_open_target_classifies_urls_hosts_and_searches_like_the_omnibox() {
+        use OpenTarget::{Url, WebSearch};
+        let url = |s: &str| Some(Url(s.to_string()));
+        let search = |s: &str| Some(WebSearch(s.to_string()));
+
+        let cases = [
+            // Explicit schemes pass through untouched
+            ("https://github.com/x", url("https://github.com/x")),
+            ("HTTP://Example.com", url("HTTP://Example.com")),
+            ("chrome://extensions", url("chrome://extensions")),
+            ("about:blank", url("about:blank")),
+            // Bare hosts / paths get https://, localhost and IPs get http://
+            ("github.com/org/repo", url("https://github.com/org/repo")),
+            ("docs.rs", url("https://docs.rs")),
+            ("news.ycombinator.com?x=1", url("https://news.ycombinator.com?x=1")),
+            ("localhost:3000/app", url("http://localhost:3000/app")),
+            ("192.168.1.10:8080", url("http://192.168.1.10:8080")),
+            ("  github.com  ", url("https://github.com")),
+            // Everything else is a web search
+            ("rust gpui docs", search("rust gpui docs")),
+            ("gpui", search("gpui")),
+            ("v1.2", search("v1.2")),
+            ("foo.b", search("foo.b")),
+            ("-bad-.com", search("-bad-.com")),
+            ("github.com:abc", search("github.com:abc")),
+            ("300.1.1.1", search("300.1.1.1")),
+            ("://nope", search("://nope")),
+            // Leading `?` forces a search even for URL-looking text
+            ("?docs.rs", search("docs.rs")),
+            // Nothing to open
+            ("", None),
+            ("   ", None),
+            ("?", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                resolve_open_target(input),
+                expected,
+                "resolve_open_target({input:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_with_no_matching_tab_opens_query_in_new_tab() {
+        let store = seeded_store();
+        let mut ctrl = SwitcherController::new(store.clone());
+
+        // A query that matches nothing -> Enter opens a web search and hides the switcher
+        ctrl.handle_hotkey(HotkeyEvent::OpenLatchedSearch, false);
+        for ch in "zebra quokka".chars() {
+            ctrl.handle_hotkey(HotkeyEvent::CharInput(ch), false);
+        }
+        assert!(ctrl.matches.is_empty());
+        let out = ctrl.handle_hotkey(HotkeyEvent::Confirm, false);
+        match out {
+            SwitcherOutcome::OpenInNewTab(OpenTarget::WebSearch(text)) => {
+                assert_eq!(text, "zebra quokka")
+            }
+            other => panic!("expected OpenInNewTab(WebSearch), got {other:?}"),
+        }
+        assert_eq!(ctrl.mode, Mode::Hidden);
+        assert_eq!(ctrl.query, "");
+
+        // A URL-shaped query that matches nothing -> navigates
+        ctrl.handle_hotkey(HotkeyEvent::OpenLatchedSearch, false);
+        ctrl.insert_text("crates.io/crates/nucleo");
+        assert!(ctrl.matches.is_empty());
+        match ctrl.handle_hotkey(HotkeyEvent::Confirm, false) {
+            SwitcherOutcome::OpenInNewTab(OpenTarget::Url(url)) => {
+                assert_eq!(url, "https://crates.io/crates/nucleo")
+            }
+            other => panic!("expected OpenInNewTab(Url), got {other:?}"),
+        }
+
+        // When something matches, Enter still switches to it (never opens a new tab)
+        ctrl.handle_hotkey(HotkeyEvent::OpenLatchedSearch, false);
+        ctrl.insert_text("github.com/org/repo/pull/421");
+        assert!(!ctrl.matches.is_empty());
+        match ctrl.handle_hotkey(HotkeyEvent::Confirm, false) {
+            SwitcherOutcome::CommitSelected(tab) => assert_eq!(tab.key.tab_id, 2),
+            other => panic!("expected CommitSelected, got {other:?}"),
+        }
+
+        // Empty query + Enter in Search mode stays a plain cancel (nothing to open)
+        let mut empty_store = SwitcherController::new(Arc::new(RwLock::new(TabStore::new())));
+        empty_store.handle_hotkey(HotkeyEvent::OpenLatchedSearch, false);
+        assert!(matches!(
+            empty_store.handle_hotkey(HotkeyEvent::Confirm, false),
+            SwitcherOutcome::CancelAndHide
+        ));
+
+        // Cycling mode never opens new tabs: ⌘ release with zero tabs just hides
+        let mut cycling = SwitcherController::new(Arc::new(RwLock::new(TabStore::new())));
+        cycling.handle_hotkey(HotkeyEvent::CycleNext, true);
+        assert!(matches!(
+            cycling.handle_hotkey(HotkeyEvent::ModifierReleased, true),
+            SwitcherOutcome::CancelAndHide
+        ));
+
+        // The new tab goes to the profile owning the MRU tab
+        assert_eq!(ctrl.most_recent_profile_id().as_deref(), Some("p1"));
     }
 }
