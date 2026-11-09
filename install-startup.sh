@@ -63,10 +63,15 @@ echo "1. Building release binary..."
 cd "$REPO_DIR"
 cargo build --release
 
-# Check if the existing bundle already uses our persistent certificate before overwriting it
+# Check if the existing bundle already uses our persistent certificate before overwriting it.
+# NOTE: deliberately not `codesign ... | grep -q`: grep -q exits on first match, codesign then
+# dies with SIGPIPE (141), and `pipefail` turns that into a false negative -> TCC reset every run.
 HAD_PERSISTENT_CERT=0
-if [[ -d "$APP_DIR" ]] && codesign -dvvv "$APP_DIR" 2>&1 | grep -q "Authority=${CERT_NAME}"; then
-    HAD_PERSISTENT_CERT=1
+if [[ -d "$APP_DIR" ]]; then
+    existing_signature="$(codesign -dvvv "$APP_DIR" 2>&1 || true)"
+    if [[ "$existing_signature" == *"Authority=${CERT_NAME}"* ]]; then
+        HAD_PERSISTENT_CERT=1
+    fi
 fi
 
 echo "2. Creating macOS .app bundle at $APP_DIR..."
