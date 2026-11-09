@@ -1,14 +1,24 @@
 #![allow(unexpected_cfgs)]
 
 use std::ffi::CStr;
+use std::io::Cursor;
+use std::sync::OnceLock;
 
 use cocoa::appkit::{
-    NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSScreen, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSScreen, NSStatusBar,
+    NSVariableStatusItemLength, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use cocoa::base::{BOOL, NO, YES, id, nil};
 use cocoa::foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
+use crossbeam_channel::Sender;
+use image::{ImageBuffer, Rgba};
+use objc::declare::ClassDecl;
+use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
+
+use crate::hotkey::HotkeyEvent;
+
+static STATUS_BAR_HOTKEY_TX: OnceLock<Sender<HotkeyEvent>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenRect {
@@ -37,6 +47,207 @@ pub fn compute_panel_frame_in_screen(
 
 pub fn is_chrome_bundle_id(bundle_id: &str) -> bool {
     bundle_id.starts_with("com.google.Chrome")
+}
+
+/// Signed distance to an axis-aligned rounded rectangle centered at `((x0+x1)/2, (y0+y1)/2)`.
+fn sd_rounded_box(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32) -> f32 {
+    let cx = (x0 + x1) * 0.5;
+    let cy = (y0 + y1) * 0.5;
+    let hx = (x1 - x0) * 0.5 - radius;
+    let hy = (y1 - y0) * 0.5 - radius;
+    let dx = (px - cx).abs() - hx;
+    let dy = (py - cy).abs() - hy;
+    let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
+    let inside = dx.max(dy).min(0.0);
+    outside + inside - radius
+}
+
+/// Generate a crisp 36×36 (@2x Retina for 18×18pt) monochrome template PNG of the
+/// "Layered Tab Cards (AltTab Style)" icon for the macOS menu bar.
+pub fn build_layered_tabs_menubar_png() -> Vec<u8> {
+    let width = 36u32;
+    let height = 36u32;
+    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
+
+    for y in 0..height {
+        for x in 0..width {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+
+            // Front browser card: [3.0..26.0] x [11.0..32.0], corner radius 4.2, stroke 3.0px
+            let d_front = sd_rounded_box(px, py, 3.0, 11.0, 26.0, 32.0, 4.2);
+            let front_stroke_dist = d_front.abs() - 1.5;
+
+            // Header bar line inside front card at y = 17.6
+            let header_line_dist = if d_front <= 0.5 {
+                (py - 17.6).abs() - 1.25
+            } else {
+                100.0
+            };
+
+            // Two window dots inside the front card's top header strip
+            let dot1_dist = ((px - 8.0).powi(2) + (py - 14.3).powi(2)).sqrt() - 1.35;
+            let dot2_dist = ((px - 12.2).powi(2) + (py - 14.3).powi(2)).sqrt() - 1.35;
+
+            // Back overlapping card: [11.0..33.0] x [3.0..23.0], masked with a crisp halo around the front card
+            let d_back = sd_rounded_box(px, py, 11.0, 3.0, 33.0, 23.0, 4.2);
+            let back_stroke_dist = if d_front > 2.2 {
+                d_back.abs() - 1.45
+            } else {
+                100.0
+            };
+
+            let min_dist = front_stroke_dist
+                .min(header_line_dist)
+                .min(dot1_dist)
+                .min(dot2_dist)
+                .min(back_stroke_dist);
+
+            // Smooth 1px anti-aliased edge coverage
+            let coverage = (0.5 - min_dist).clamp(0.0, 1.0);
+            let alpha = (coverage * 255.0).round() as u8;
+            img.put_pixel(x, y, Rgba([0, 0, 0, alpha]));
+        }
+    }
+
+    let mut png_bytes = Vec::new();
+    img.write_to(
+        &mut Cursor::new(&mut png_bytes),
+        image::ImageFormat::Png,
+    )
+    .expect("failed to encode menu bar icon PNG");
+    png_bytes
+}
+
+extern "C" fn on_menu_switch_tabs(_this: &Object, _cmd: Sel, _sender: id) {
+    if let Some(tx) = STATUS_BAR_HOTKEY_TX.get() {
+        let _ = tx.try_send(HotkeyEvent::OpenLatchedSearch);
+    }
+}
+
+extern "C" fn on_menu_open_accessibility(_this: &Object, _cmd: Sel, _sender: id) {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
+}
+
+fn status_menu_handler_class() -> &'static Class {
+    static CLASS: OnceLock<&'static Class> = OnceLock::new();
+    CLASS.get_or_init(|| unsafe {
+        let superclass = class!(NSObject);
+        let mut decl = ClassDecl::new("CTSStatusMenuHandler", superclass)
+            .expect("failed to declare CTSStatusMenuHandler");
+        decl.add_method(
+            sel!(onSwitchTabs:),
+            on_menu_switch_tabs as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(onOpenAccessibility:),
+            on_menu_open_accessibility as extern "C" fn(&Object, Sel, id),
+        );
+        decl.register()
+    })
+}
+
+/// Install the persistent macOS menu bar icon (`NSStatusItem`) with the Layered Tab Cards template icon
+/// and native dropdown menu (similar to Rectangle / AltTab).
+pub fn install_status_bar_item(hotkey_tx: Sender<HotkeyEvent>) {
+    let _ = STATUS_BAR_HOTKEY_TX.set(hotkey_tx);
+
+    unsafe {
+        let status_bar = NSStatusBar::systemStatusBar(nil);
+        let status_item = status_bar.statusItemWithLength_(NSVariableStatusItemLength);
+        if status_item == nil {
+            return;
+        }
+        // Retain the status item so it stays alive in the menu bar for the lifetime of the daemon
+        let _: id = msg_send![status_item, retain];
+
+        let png_bytes = build_layered_tabs_menubar_png();
+        let ns_data: id = msg_send![
+            class!(NSData),
+            dataWithBytes: png_bytes.as_ptr() as *const libc::c_void
+            length: png_bytes.len()
+        ];
+        if ns_data != nil {
+            let ns_image: id = msg_send![class!(NSImage), alloc];
+            let ns_image: id = msg_send![ns_image, initWithData: ns_data];
+            if ns_image != nil {
+                let _: () = msg_send![ns_image, setSize: NSSize::new(18.0, 18.0)];
+                let _: () = msg_send![ns_image, setTemplate: YES];
+                let button: id = msg_send![status_item, button];
+                if button != nil {
+                    let _: () = msg_send![button, setImage: ns_image];
+                }
+            }
+        }
+
+        let handler_cls = status_menu_handler_class();
+        let handler: id = msg_send![handler_cls, new];
+
+        let menu: id = msg_send![class!(NSMenu), alloc];
+        let menu_title = NSString::alloc(nil).init_str("Chrome Tab Switcher");
+        let menu: id = msg_send![menu, initWithTitle: menu_title];
+
+        // 1. Header Status Item (disabled label)
+        let header_item: id = msg_send![class!(NSMenuItem), alloc];
+        let header_title =
+            NSString::alloc(nil).init_str("Chrome Tab Switcher · Active (⌘`)");
+        let empty_key = NSString::alloc(nil).init_str("");
+        let header_item: id = msg_send![
+            header_item,
+            initWithTitle: header_title
+            action: nil
+            keyEquivalent: empty_key
+        ];
+        let _: () = msg_send![header_item, setEnabled: NO];
+        let _: () = msg_send![menu, addItem: header_item];
+
+        let sep1: id = msg_send![class!(NSMenuItem), separatorItem];
+        let _: () = msg_send![menu, addItem: sep1];
+
+        // 2. Open Tab Switcher
+        let open_item: id = msg_send![class!(NSMenuItem), alloc];
+        let open_title = NSString::alloc(nil).init_str("Open Tab Switcher (⌘` / ⌥`)");
+        let open_item: id = msg_send![
+            open_item,
+            initWithTitle: open_title
+            action: sel!(onSwitchTabs:)
+            keyEquivalent: empty_key
+        ];
+        let _: () = msg_send![open_item, setTarget: handler];
+        let _: () = msg_send![menu, addItem: open_item];
+
+        // 3. Accessibility Settings
+        let access_item: id = msg_send![class!(NSMenuItem), alloc];
+        let access_title = NSString::alloc(nil).init_str("Accessibility Settings…");
+        let access_item: id = msg_send![
+            access_item,
+            initWithTitle: access_title
+            action: sel!(onOpenAccessibility:)
+            keyEquivalent: empty_key
+        ];
+        let _: () = msg_send![access_item, setTarget: handler];
+        let _: () = msg_send![menu, addItem: access_item];
+
+        let sep2: id = msg_send![class!(NSMenuItem), separatorItem];
+        let _: () = msg_send![menu, addItem: sep2];
+
+        // 4. Quit Chrome Tab Switcher
+        let quit_item: id = msg_send![class!(NSMenuItem), alloc];
+        let quit_title = NSString::alloc(nil).init_str("Quit Chrome Tab Switcher");
+        let quit_key = NSString::alloc(nil).init_str("q");
+        let quit_item: id = msg_send![
+            quit_item,
+            initWithTitle: quit_title
+            action: sel!(terminate:)
+            keyEquivalent: quit_key
+        ];
+        let _: () = msg_send![quit_item, setTarget: NSApp()];
+        let _: () = msg_send![menu, addItem: quit_item];
+
+        let _: () = msg_send![status_item, setMenu: menu];
+    }
 }
 
 /// Configure the process as an Accessory app (`LSUIElement` equivalent): no Dock icon, never steals menu bar.
@@ -258,5 +469,19 @@ mod tests {
         assert!(is_chrome_bundle_id("com.google.Chrome"));
         assert!(is_chrome_bundle_id("com.google.Chrome.canary"));
         assert!(!is_chrome_bundle_id("com.apple.Safari"));
+    }
+
+    #[test]
+    fn generates_valid_retina_layered_tabs_menubar_png() {
+        let png = build_layered_tabs_menubar_png();
+        let decoded = image::load_from_memory(&png).expect("should decode generated PNG");
+        assert_eq!(decoded.width(), 36);
+        assert_eq!(decoded.height(), 36);
+        let rgba = decoded.into_rgba8();
+        // Corner pixel (0, 0) must be transparent
+        assert_eq!(rgba.get_pixel(0, 0)[3], 0);
+        // Some pixels along the front card border must be opaque
+        let has_opaque = rgba.pixels().any(|p| p[3] > 200);
+        assert!(has_opaque);
     }
 }
