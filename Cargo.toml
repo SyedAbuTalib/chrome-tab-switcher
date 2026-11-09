@@ -1,0 +1,37 @@
+[package]
+name = "chrome-tab-switcher"
+version = "0.1.0"
+edition = "2024"
+description = "Zero-latency macOS Chrome tab switcher built with Rust and GPUI"
+
+[lib]
+name = "chrome_tab_switcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chrome-tab-switcher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+cocoa = "=0.26.0"
+cocoa-foundation = "=0.2.0"
+core-foundation = "=0.10.0"
+core-foundation-sys = "0.8.6"
+core-graphics = "0.24"
+crossbeam-channel = "0.5"
+env_logger = "0.11"
+futures-util = "0.3"
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "webp", "gif", "bmp"] }
+libc = "0.2"
+log = "0.4"
+nucleo-matcher = "0.3"
+objc = "0.2"
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+smallvec = "1.6"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
+tokio-tungstenite = "0.26"
