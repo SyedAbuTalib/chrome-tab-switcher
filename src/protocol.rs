@@ -27,6 +27,22 @@ pub enum ExtensionToDaemon {
         tab_id: i64,
         preview_url: String,
     },
+    /// Diagnostic: `chrome.tabs.captureVisibleTab` threw. Logged by the daemon so "why does
+    /// this tab have no thumbnail?" can be answered from `stderr.log`.
+    PreviewCaptureFailed {
+        profile_id: String,
+        tab_id: i64,
+        window_id: i64,
+        #[serde(default)]
+        url: String,
+        attempt: u32,
+        /// Chrome will never capture this page (enterprise `ExtensionSettings` policy,
+        /// `chrome://`); the extension stops trying until the tab changes origin.
+        #[serde(default)]
+        permanent: bool,
+        will_retry: bool,
+        error: String,
+    },
     WindowRemoved {
         profile_id: String,
         window_id: i64,
@@ -66,6 +82,9 @@ pub enum DaemonToExtension {
     SearchWeb {
         text: String,
     },
+    /// Switcher is being summoned: re-capture the focused window's visible tab right now so
+    /// its card shows the page as the user is leaving it.
+    CapturePreview,
     Pong,
 }
 
@@ -136,6 +155,32 @@ mod tests {
         let ping_json = r#"{"type": "ping"}"#;
         let ping: ExtensionToDaemon = serde_json::from_str(ping_json).unwrap();
         assert_eq!(ping, ExtensionToDaemon::Ping);
+
+        let failed_json = r#"{
+            "type": "preview_capture_failed",
+            "profile_id": "prof-1",
+            "tab_id": 55,
+            "window_id": 2,
+            "url": "https://calendar.google.com/calendar/u/0/r",
+            "attempt": 1,
+            "permanent": true,
+            "will_retry": false,
+            "error": "This page cannot be scripted due to an ExtensionsSettings policy."
+        }"#;
+        let failed: ExtensionToDaemon = serde_json::from_str(failed_json).unwrap();
+        assert_eq!(
+            failed,
+            ExtensionToDaemon::PreviewCaptureFailed {
+                profile_id: "prof-1".into(),
+                tab_id: 55,
+                window_id: 2,
+                url: "https://calendar.google.com/calendar/u/0/r".into(),
+                attempt: 1,
+                permanent: true,
+                will_retry: false,
+                error: "This page cannot be scripted due to an ExtensionsSettings policy.".into(),
+            }
+        );
     }
 
     #[test]
@@ -172,6 +217,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&search_web).unwrap(),
             serde_json::json!({ "type": "search_web", "text": "rust gpui docs" })
+        );
+
+        assert_eq!(
+            serde_json::to_value(DaemonToExtension::CapturePreview).unwrap(),
+            serde_json::json!({ "type": "capture_preview" })
         );
     }
 }

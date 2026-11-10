@@ -540,6 +540,10 @@ impl SwitcherView {
                 self.sync_scroll_to_selection(was_hidden);
                 cx.notify();
                 if was_hidden {
+                    // Refresh the thumbnail of the tab the user is leaving. The capture arrives
+                    // asynchronously (~150ms) and repaints via `on_store_or_favicon_updated`,
+                    // so the summon itself stays zero-latency.
+                    self.ws_handle.request_preview_capture();
                     PanelWindowAction::Show
                 } else {
                     PanelWindowAction::None

@@ -100,6 +100,20 @@ impl WsBridgeHandle {
         )
     }
 
+    /// Ask every connected profile to re-capture its focused window's visible tab. Sent on
+    /// summon so thumbnails show pages as the user left them. Broadcast is correct here: each
+    /// profile's front tab is a different page, and a capture is cheap and idempotent.
+    pub fn request_preview_capture(&self) -> bool {
+        let reg = self.registry.read();
+        let mut sent_any = false;
+        for tx in reg.by_conn_id.values() {
+            if tx.send(DaemonToExtension::CapturePreview).is_ok() {
+                sent_any = true;
+            }
+        }
+        sent_any
+    }
+
     /// Deliver `cmd` to exactly one extension connection — the given profile's if it is
     /// connected, otherwise any live one. Unlike `activate_tab`, this must never broadcast:
     /// opening a tab in every connected profile at once would be the wrong result.
@@ -268,6 +282,40 @@ async fn handle_connection(
             continue;
         }
 
+        if let ExtensionToDaemon::PreviewCaptureFailed {
+            tab_id,
+            window_id,
+            url,
+            attempt,
+            permanent,
+            will_retry,
+            error,
+            ..
+        } = &parsed
+        {
+            let target = if url.is_empty() {
+                format!("tab {tab_id} (window {window_id})")
+            } else {
+                format!("{url} (tab {tab_id}, window {window_id})")
+            };
+            if *permanent {
+                log::warn!(
+                    "No thumbnail possible for {target}: {error} — Chrome blocks captureVisibleTab \
+                     here (enterprise ExtensionSettings policy or a chrome:// page); the card will \
+                     keep its favicon placeholder."
+                );
+            } else if *will_retry {
+                log::debug!(
+                    "captureVisibleTab failed for {target} (attempt {attempt}, retrying): {error}"
+                );
+            } else {
+                log::warn!(
+                    "captureVisibleTab gave up on {target} after {attempt} attempts: {error}"
+                );
+            }
+            continue;
+        }
+
         if let Some(profile_id) = extract_profile_id(&parsed) {
             registry
                 .write()
@@ -299,6 +347,7 @@ fn extract_profile_id(msg: &ExtensionToDaemon) -> Option<&str> {
         | ExtensionToDaemon::TabRemoved { profile_id, .. }
         | ExtensionToDaemon::TabActivated { profile_id, .. }
         | ExtensionToDaemon::TabPreviewUpdated { profile_id, .. }
+        | ExtensionToDaemon::PreviewCaptureFailed { profile_id, .. }
         | ExtensionToDaemon::WindowRemoved { profile_id, .. } => Some(profile_id.as_str()),
         ExtensionToDaemon::Ping => None,
     }
@@ -453,5 +502,12 @@ mod tests {
                 text: "rust gpui docs".into()
             }
         );
+
+        // 5. Summon -> every connection is asked to re-capture its visible tab
+        assert!(handle.request_preview_capture());
+        let capture_msg = ws_stream.next().await.unwrap().unwrap();
+        let parsed_capture: DaemonToExtension =
+            serde_json::from_str(capture_msg.to_text().unwrap()).unwrap();
+        assert_eq!(parsed_capture, DaemonToExtension::CapturePreview);
     }
 }

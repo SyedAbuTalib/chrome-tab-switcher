@@ -183,7 +183,8 @@ impl TabStore {
                 self.tabs
                     .retain(|k, v| !(k.profile_id == profile_id && v.window_id == window_id));
             }
-            ExtensionToDaemon::Ping => {}
+            // Diagnostics only — logged by ws_server, nothing to apply to the store.
+            ExtensionToDaemon::PreviewCaptureFailed { .. } | ExtensionToDaemon::Ping => {}
         }
     }
 

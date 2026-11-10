@@ -82,6 +82,14 @@ export function createBridgeController({
   nowFn = () => Date.now(),
   enableKeepaliveTimer = true,
   captureSettleMs = typeof process !== "undefined" ? 0 : 120,
+  // Second capture after a tab becomes visible: heavy SPAs (Calendar, Gmail, Figma) often
+  // still show a stale or half-drawn frame at +120ms once Chrome un-throttles them.
+  settleRecaptureMs = 900,
+  // Chrome allows MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND = 2.
+  minCaptureIntervalMs = 520,
+  // Backoff between failed captures. Discarded tabs reload on activation and can take a few
+  // seconds to produce a frame; ~7.5s total covers cold reloads of heavy pages like Calendar.
+  captureRetryScheduleMs = [520, 1000, 2000, 4000],
 } = {}) {
   let ws = null;
   let profileId = null;
@@ -90,12 +98,18 @@ export function createBridgeController({
   let reconnectTimer = null;
   let keepaliveTimer = null;
   let listenersRegistered = false;
-  let captureTimer = null;
-  let captureRetryTimer = null;
-  let pendingCapture = null;
+
+  // ---- Preview capture pipeline -------------------------------------------------------------
+  // `captureVisibleTab(windowId)` photographs whatever tab is *currently* visible in a window,
+  // so the queue is keyed by window and the active tab is resolved at capture time (never from
+  // when the capture was requested — otherwise a quick tab switch attributes the new tab's
+  // picture to the old tab). One global timer paces calls to respect Chrome's 2/sec quota.
+  const pendingCaptures = new Map(); // windowId -> { dueAt, attempt, settle }
+  const uncapturableTabs = new Map(); // tabId -> origin Chrome refuses to capture (policy, chrome://)
+  const tabPreviews = new Map(); // tabId -> data URL of the last successful capture
+  let captureQueueTimer = null;
+  let captureInFlight = false;
   let lastCaptureTimeMs = 0;
-  const MIN_CAPTURE_INTERVAL_MS = 520;
-  const tabPreviews = new Map();
 
   function sendJson(payload) {
     if (ws && ws.readyState === WebSocketImpl.OPEN) {
@@ -144,23 +158,148 @@ export function createBridgeController({
     }
   }
 
-  async function captureActiveTabPreview(windowId, tabId) {
-    if (
-      !profileId ||
-      typeof windowId !== "number" ||
-      windowId < 0 ||
-      typeof tabId !== "number" ||
-      typeof chromeApi.tabs.captureVisibleTab !== "function"
-    ) {
+  /** Errors Chrome will keep returning for this page no matter how often we retry. */
+  function isPermanentCaptureError(message) {
+    return /ExtensionsSettings policy|permission is not in effect|Cannot access (contents|a chrome)|cannot be scripted|must request permission/i.test(
+      message
+    );
+  }
+
+  function captureBlockKey(url) {
+    try {
+      return new URL(url).origin;
+    } catch (_err) {
+      return typeof url === "string" ? url : "";
+    }
+  }
+
+  /**
+   * Ask for a fresh thumbnail of whatever is visible in `windowId`.
+   * - A fresh request (attempt 0) supersedes any pending retry/settle for that window and
+   *   coalesces with an already-imminent fresh request.
+   * - Retries only land if nothing newer is pending.
+   * Without timers (tests), captures run immediately and nothing is rescheduled.
+   */
+  function requestCapture(
+    windowId,
+    { delayMs = captureSettleMs, attempt = 0, settle = false } = {}
+  ) {
+    if (typeof windowId !== "number" || windowId < 0) {
+      return Promise.resolve();
+    }
+    if (captureSettleMs <= 0) {
+      return attempt === 0 && !settle
+        ? captureWindowPreview(windowId, 0, false)
+        : Promise.resolve();
+    }
+    const dueAt = nowFn() + Math.max(0, delayMs);
+    const existing = pendingCaptures.get(windowId);
+    if (existing) {
+      const existingIsFresh = existing.attempt === 0 && !existing.settle;
+      if (attempt > 0 || settle) {
+        // Something newer already wants this window: let it win.
+        armCaptureQueue();
+        return Promise.resolve();
+      }
+      if (existingIsFresh && existing.dueAt <= dueAt) {
+        armCaptureQueue();
+        return Promise.resolve();
+      }
+    }
+    pendingCaptures.set(windowId, { dueAt, attempt, settle });
+    armCaptureQueue();
+    return Promise.resolve();
+  }
+
+  function armCaptureQueue() {
+    if (captureQueueTimer !== null) {
+      clearTimeout(captureQueueTimer);
+      captureQueueTimer = null;
+    }
+    if (captureInFlight || pendingCaptures.size === 0) return;
+    let nextDue = Infinity;
+    for (const slot of pendingCaptures.values()) {
+      if (slot.dueAt < nextDue) nextDue = slot.dueAt;
+    }
+    const earliestAllowed = lastCaptureTimeMs + minCaptureIntervalMs;
+    const fireAt = Math.max(nextDue, earliestAllowed);
+    captureQueueTimer = setTimeout(
+      runCaptureQueue,
+      Math.max(0, fireAt - nowFn())
+    );
+  }
+
+  async function runCaptureQueue() {
+    captureQueueTimer = null;
+    if (captureInFlight) return;
+    const now = nowFn();
+    if (now - lastCaptureTimeMs < minCaptureIntervalMs) {
+      armCaptureQueue();
       return;
     }
+    let nextWindowId = null;
+    let nextSlot = null;
+    for (const [windowId, slot] of pendingCaptures) {
+      if (slot.dueAt <= now && (nextSlot === null || slot.dueAt < nextSlot.dueAt)) {
+        nextWindowId = windowId;
+        nextSlot = slot;
+      }
+    }
+    if (nextSlot === null) {
+      armCaptureQueue();
+      return;
+    }
+    pendingCaptures.delete(nextWindowId);
+    captureInFlight = true;
+    try {
+      await captureWindowPreview(nextWindowId, nextSlot.attempt, nextSlot.settle);
+    } finally {
+      captureInFlight = false;
+      armCaptureQueue();
+    }
+  }
 
+  async function isWindowFocused(windowId) {
+    if (typeof chromeApi.windows.get !== "function") return true;
+    try {
+      const win = await chromeApi.windows.get(windowId);
+      return Boolean(win && win.focused);
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  /**
+   * Capture the tab currently visible in `windowId` and attribute the image to *that* tab.
+   * On success, schedule one "settle" re-capture so heavy SPAs that were still painting at
+   * +120ms get a second shot. On failure, classify: permanent errors (enterprise
+   * ExtensionSettings policy, chrome:// pages) are remembered per tab+origin and never retried;
+   * transient ones (rate limit, window not yet on screen, reloading tab with no frame yet)
+   * back off through `captureRetryScheduleMs`.
+   */
+  async function captureWindowPreview(windowId, attempt = 0, settle = false) {
+    if (!profileId || typeof chromeApi.tabs.captureVisibleTab !== "function") {
+      return;
+    }
+    let tab = null;
+    try {
+      const tabs = await chromeApi.tabs.query({ active: true, windowId });
+      tab = tabs && tabs[0];
+    } catch (_err) {
+      return; // window is gone
+    }
+    if (!tab || typeof tab.id !== "number") return;
+    if (uncapturableTabs.get(tab.id) === captureBlockKey(tab.url)) return;
+    // Follow-ups are only worth it while the window is still the one the user is looking at;
+    // capturing an occluded window just burns quota and produces "view is invisible" noise.
+    if ((attempt > 0 || settle) && !(await isWindowFocused(windowId))) return;
+
+    lastCaptureTimeMs = nowFn();
     try {
       const rawDataUrl = await chromeApi.tabs.captureVisibleTab(windowId, {
         format: "jpeg",
         quality: 70,
       });
-      lastCaptureTimeMs = nowFn();
       if (
         typeof rawDataUrl === "string" &&
         rawDataUrl.startsWith("data:image/")
@@ -170,54 +309,64 @@ export function createBridgeController({
           typeof createImageBitmap !== "undefined"
             ? await downscaleDataUrlIfSupported(rawDataUrl)
             : rawDataUrl;
-        tabPreviews.set(tabId, dataUrl);
+        tabPreviews.set(tab.id, dataUrl);
         sendJson({
           type: "tab_preview_updated",
           profile_id: profileId,
-          tab_id: tabId,
+          tab_id: tab.id,
           preview_url: dataUrl,
         });
       }
-    } catch (_err) {
-      // If rate-limited by Chrome's MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND (2/sec)
-      // during rapid Ctrl+Tab cycling, schedule a trailing retry so the final tab gets captured.
-      if (captureSettleMs > 0) {
-        pendingCapture = { windowId, tabId };
-        if (captureRetryTimer === null) {
-          captureRetryTimer = setTimeout(() => {
-            captureRetryTimer = null;
-            if (pendingCapture) {
-              const next = pendingCapture;
-              pendingCapture = null;
-              captureActiveTabPreview(next.windowId, next.tabId);
-            }
-          }, MIN_CAPTURE_INTERVAL_MS);
-        }
+      if (!settle && settleRecaptureMs > 0) {
+        requestCapture(windowId, { delayMs: settleRecaptureMs, settle: true });
+      }
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      const permanent = isPermanentCaptureError(message);
+      const willRetry =
+        !permanent &&
+        captureSettleMs > 0 &&
+        attempt < captureRetryScheduleMs.length;
+      if (permanent) {
+        uncapturableTabs.set(tab.id, captureBlockKey(tab.url));
+      }
+      sendJson({
+        type: "preview_capture_failed",
+        profile_id: profileId,
+        tab_id: tab.id,
+        window_id: windowId,
+        url: typeof tab.url === "string" ? tab.url : "",
+        attempt: attempt + 1,
+        permanent,
+        will_retry: willRetry,
+        error: message,
+      });
+      if (willRetry) {
+        requestCapture(windowId, {
+          delayMs: captureRetryScheduleMs[attempt],
+          attempt: attempt + 1,
+        });
       }
     }
   }
 
-  function scheduleTabPreviewCapture(windowId, tabId) {
-    if (captureSettleMs <= 0) {
-      return captureActiveTabPreview(windowId, tabId);
-    }
-    pendingCapture = { windowId, tabId };
-    if (captureTimer !== null) {
-      clearTimeout(captureTimer);
-    }
-    const elapsed = nowFn() - lastCaptureTimeMs;
-    const waitMs = Math.max(
-      captureSettleMs,
-      elapsed < MIN_CAPTURE_INTERVAL_MS ? MIN_CAPTURE_INTERVAL_MS - elapsed : 0
-    );
-    captureTimer = setTimeout(() => {
-      captureTimer = null;
-      if (pendingCapture) {
-        const next = pendingCapture;
-        pendingCapture = null;
-        captureActiveTabPreview(next.windowId, next.tabId);
+  /**
+   * Snapshot whichever tab is currently visible in the focused window. Used when the daemon
+   * summons the switcher so cards reflect the page as the user *left* it, not as they arrived.
+   */
+  async function captureFocusedWindowPreview() {
+    try {
+      const tabs = await chromeApi.tabs.query({
+        active: true,
+        lastFocusedWindow: true,
+      });
+      const tab = tabs && tabs[0];
+      if (tab && typeof tab.windowId === "number") {
+        await requestCapture(tab.windowId, { delayMs: 0 });
       }
-    }, waitMs);
+    } catch (_err) {
+      // No focused window (e.g. Chrome in background with no windows).
+    }
   }
 
   async function sendSnapshot() {
@@ -235,9 +384,11 @@ export function createBridgeController({
       tabs: wireTabs,
     });
 
+    // One capture per window, paced by the queue so a multi-window reconnect doesn't blow
+    // through Chrome's 2/sec quota the way back-to-back calls did.
     for (const tab of validTabs) {
       if (tab.active && typeof tab.windowId === "number") {
-        await captureActiveTabPreview(tab.windowId, tab.id);
+        await requestCapture(tab.windowId, { delayMs: 0 });
       }
     }
   }
@@ -251,6 +402,13 @@ export function createBridgeController({
     }
 
     if (!msg || typeof msg.type !== "string") return;
+
+    // Daemon is about to show the switcher: refresh the thumbnail of the tab the user is
+    // leaving so cards show pages as they were left, not as they were arrived at.
+    if (msg.type === "capture_preview") {
+      await captureFocusedWindowPreview();
+      return;
+    }
 
     if (msg.type === "activate_tab") {
       const { window_id, tab_id } = msg;
@@ -382,12 +540,13 @@ export function createBridgeController({
         changeInfo &&
         changeInfo.status === "complete"
       ) {
-        scheduleTabPreviewCapture(tab.windowId, tab.id);
+        requestCapture(tab.windowId);
       }
     });
 
     chromeApi.tabs.onRemoved.addListener((tabId) => {
       tabPreviews.delete(tabId);
+      uncapturableTabs.delete(tabId);
       sendJson({
         type: "tab_removed",
         profile_id: profileId,
@@ -403,7 +562,7 @@ export function createBridgeController({
         tab_id: activeInfo.tabId,
         timestamp_ms: nowFn(),
       });
-      await scheduleTabPreviewCapture(activeInfo.windowId, activeInfo.tabId);
+      await requestCapture(activeInfo.windowId);
     });
 
     chromeApi.windows.onFocusChanged.addListener(async (windowId) => {
@@ -427,6 +586,9 @@ export function createBridgeController({
             tab_id: tabs[0].id,
             timestamp_ms: nowFn(),
           });
+          // Switching *windows* (not tabs) never fires tabs.onActivated, so without this the
+          // front tab of every other window keeps a frozen thumbnail forever.
+          await requestCapture(windowId);
         }
       } catch (_err) {
         // Ignore transient window lookup errors.
