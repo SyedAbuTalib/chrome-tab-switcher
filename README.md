@@ -18,7 +18,12 @@ Switch between your Most Recently Used (MRU) Chrome tabs from **any macOS applic
 - **3×2 Visual Screenshot Grid + Continuous Scrollbar**:
   - Captures live page previews via `chrome.tabs.captureVisibleTab` (with automatic `OffscreenCanvas` downscaling and rate-limit retry for rapid `Ctrl+Tab` switching) and decodes them directly into BGRA Metal textures.
   - Automatically resolves video thumbnails (`mqdefault.jpg`) for background YouTube tabs even before you visit them.
+  - **Hand-drawn previews for Google apps**: managed (enterprise) Chrome profiles commonly block `captureVisibleTab` on `*.google.com` via an `ExtensionSettings` policy, so Gmail, Calendar, Maps, Drive, Docs/Sheets/Slides/Forms, Meet, Chat, Keep, Photos, Search, Translate, News, Gemini, Cloud Console and Contacts fall back to bespoke vector cards. Real screenshots always take priority when Chrome allows them, and Google pages without bespoke art keep the plain favicon placeholder rather than a misleading fake.
   - Smooth two-finger trackpad scrolling with a continuous right-hand scrollbar and direct mouse-click selection.
+
+<p align="center">
+  <img src="docs/images/synthetic-google-previews.svg" alt="Synthetic preview cards for Google apps" width="100%" />
+</p>
 - **Auto-Compact on Search**:
   - Tap **`Space`** (while holding `⌘`) or press **`⌥` + `` ` ``** to latch into Search mode so releasing `⌘` keeps the switcher open.
   - As soon as you start typing a query, the view automatically morphs from the 3×2 visual card grid into a **10-row high-density Compact Search List** powered by `nucleo-matcher` (`<0.2ms` fuzzy matching with character highlighting).
@@ -40,7 +45,7 @@ Switch between your Most Recently Used (MRU) Chrome tabs from **any macOS applic
 2. **Rust Daemon (`src/`)**:
    - **`hotkey.rs`**: Dedicated `CGEventTap` + `CFRunLoop` thread that intercepts `⌘` + `` ` ``, `⌘` + `⇧` + `` ` ``, and `⌥` + `` ` `` globally across macOS.
    - **`store.rs`**: Thread-safe in-memory MRU tab store across multiple Chrome windows and profiles, paired with `nucleo-matcher` for weighted title (`1.5×`) + URL (`1.0×`) + recency tie-breaker scoring.
-   - **`favicon.rs`**: Asynchronous favicon & page-preview fetcher with an in-memory BGRA `gpui::RenderImage` cache so icons and screenshots render on the very first frame.
+   - **`favicon.rs`**: Asynchronous favicon & page-preview fetcher with an in-memory BGRA `gpui::RenderImage` cache so icons and screenshots render on the very first frame. Preview fallback chain: real capture → YouTube thumbnail → [`synthetic_preview.rs`](./src/synthetic_preview.rs) artwork for Google apps.
    - **`ui/` & `macos.rs`**: Non-activating floating `NSPanel` (`NSFloatingWindowLevel`) styled in **Frosted Daylight**.
 
 ---
@@ -106,9 +111,14 @@ To run a live auto-rebuilding development loop whenever you edit files in `src/`
 ### Running Tests
 
 ```zsh
-# Run all 34 Rust unit & integration tests
+# Run all 37 Rust unit & integration tests
 cargo test
 
 # Run the Chrome MV3 extension unit tests
 node --test extension/background.test.mjs
+
+# Preview the synthetic Google-app card artwork exactly as GPUI rasterizes it
+cargo test --test contact_sheet -- --ignored --nocapture && open target/synthetic_previews_contact_sheet.png
 ```
+
+> **Why no thumbnail for some tabs?** Chrome refuses `captureVisibleTab` on `chrome://` pages and on any host an enterprise `ExtensionSettings` policy blocks (check `chrome://policy`). The daemon logs each such page once in `~/Library/Logs/chrome-tab-switcher/stderr.log`, and Google apps fall back to the artwork above.

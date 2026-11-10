@@ -35,3 +35,8 @@ serde_json = "1.0"
 smallvec = "1.6"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tokio-tungstenite = "0.26"
+
+[dev-dependencies]
+# Same version gpui already compiles; used only to rasterize the synthetic preview art in tests.
+# No default features: the artwork is shape-only (no text, filters, or embedded rasters).
+resvg = { version = "0.45", default-features = false }

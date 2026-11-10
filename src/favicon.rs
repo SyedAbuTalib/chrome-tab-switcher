@@ -8,6 +8,10 @@ use image::{Frame, ImageBuffer, Rgba};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 
+use crate::synthetic_preview::{
+    google_product_for_url, product_from_synthetic_url, synthetic_preview_url,
+};
+
 #[derive(Clone)]
 pub enum CachedFavicon {
     Raster(Arc<RenderImage>),
@@ -178,6 +182,9 @@ pub fn youtube_thumbnail_url(page_url: &str) -> Option<String> {
     Some(format!("https://i.ytimg.com/vi/{clean_id}/mqdefault.jpg"))
 }
 
+/// Preview source for a tab, in priority order: a real capture from the extension, a YouTube
+/// video thumbnail, or hand-drawn artwork for Google products (whose captures enterprise
+/// policies commonly block). `None` means "show the favicon placeholder".
 pub fn effective_preview_url(preview_url: Option<&str>, page_url: &str) -> Option<String> {
     if let Some(p) = preview_url.map(str::trim).filter(|s| !s.is_empty()) {
         if p.starts_with("data:image/") || p.starts_with("https://") || p.starts_with("http://") {
@@ -185,6 +192,7 @@ pub fn effective_preview_url(preview_url: Option<&str>, page_url: &str) -> Optio
         }
     }
     youtube_thumbnail_url(page_url)
+        .or_else(|| google_product_for_url(page_url).map(synthetic_preview_url))
 }
 
 pub fn decode_favicon_bytes(
@@ -392,6 +400,20 @@ impl FaviconService {
         page_url: &str,
     ) -> Option<CachedFavicon> {
         let target_url = effective_preview_url(preview_url, page_url)?;
+
+        if let Some(product) = product_from_synthetic_url(&target_url) {
+            let mut guard = self.cache.lock();
+            if let Some(cached) = guard.get(&target_url) {
+                return Some(cached);
+            }
+            let decoded = decode_favicon_bytes(
+                product.svg().as_bytes(),
+                Some("image/svg+xml"),
+                &target_url,
+            )?;
+            guard.insert(target_url, decoded.clone());
+            return Some(decoded);
+        }
 
         if target_url.starts_with("data:") {
             let cache_key = compact_data_uri_key("prev", &target_url);

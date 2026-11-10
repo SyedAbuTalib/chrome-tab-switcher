@@ -894,6 +894,7 @@ dependencies = [
  "objc",
  "parking_lot",
  "reqwest",
+ "resvg",
  "serde",
  "serde_json",
  "smallvec",
