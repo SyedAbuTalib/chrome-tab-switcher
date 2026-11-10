@@ -1,9 +1,10 @@
-//! Hand-drawn "fake" page previews for Google products whose real screenshots Chrome refuses
-//! to capture (enterprise `ExtensionSettings` policies block `captureVisibleTab` on
-//! `*.google.com` for many managed browsers). Drawn in the same flat, text-free style as the
+//! Hand-drawn "fake" page previews for Google products and built-in `chrome://` pages whose real
+//! screenshots Chrome refuses to capture (enterprise `ExtensionSettings` policies block
+//! `captureVisibleTab` on `*.google.com` for many managed browsers, and Chrome's extension
+//! sandbox always blocks `chrome://*` URLs). Drawn in the same flat, text-free style as the
 //! README artwork, at the card's 266×156 aspect, and used only when no real capture exists.
 
-/// A Google product with bespoke artwork in `synthetic_previews/`.
+/// A Google product or built-in Chrome page with bespoke artwork in `synthetic_previews/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GoogleProduct {
     Gmail,
@@ -24,10 +25,17 @@ pub enum GoogleProduct {
     Gemini,
     Cloud,
     Contacts,
+    ChromeExtensions,
+    ChromeSettings,
+    ChromeNewTab,
+    ChromeHistory,
+    ChromeDownloads,
+    ChromeBookmarks,
+    ChromeFlags,
 }
 
 impl GoogleProduct {
-    pub const ALL: [GoogleProduct; 18] = [
+    pub const ALL: [GoogleProduct; 25] = [
         Self::Gmail,
         Self::Calendar,
         Self::Maps,
@@ -46,6 +54,13 @@ impl GoogleProduct {
         Self::Gemini,
         Self::Cloud,
         Self::Contacts,
+        Self::ChromeExtensions,
+        Self::ChromeSettings,
+        Self::ChromeNewTab,
+        Self::ChromeHistory,
+        Self::ChromeDownloads,
+        Self::ChromeBookmarks,
+        Self::ChromeFlags,
     ];
 
     /// Stable identifier used in cache keys (`synthetic:<key>`).
@@ -69,6 +84,13 @@ impl GoogleProduct {
             Self::Gemini => "gemini",
             Self::Cloud => "cloud",
             Self::Contacts => "contacts",
+            Self::ChromeExtensions => "chrome-extensions",
+            Self::ChromeSettings => "chrome-settings",
+            Self::ChromeNewTab => "chrome-newtab",
+            Self::ChromeHistory => "chrome-history",
+            Self::ChromeDownloads => "chrome-downloads",
+            Self::ChromeBookmarks => "chrome-bookmarks",
+            Self::ChromeFlags => "chrome-flags",
         }
     }
 
@@ -97,6 +119,13 @@ impl GoogleProduct {
             Self::Gemini => include_str!("synthetic_previews/gemini.svg"),
             Self::Cloud => include_str!("synthetic_previews/cloud.svg"),
             Self::Contacts => include_str!("synthetic_previews/contacts.svg"),
+            Self::ChromeExtensions => include_str!("synthetic_previews/chrome_extensions.svg"),
+            Self::ChromeSettings => include_str!("synthetic_previews/chrome_settings.svg"),
+            Self::ChromeNewTab => include_str!("synthetic_previews/chrome_newtab.svg"),
+            Self::ChromeHistory => include_str!("synthetic_previews/chrome_history.svg"),
+            Self::ChromeDownloads => include_str!("synthetic_previews/chrome_downloads.svg"),
+            Self::ChromeBookmarks => include_str!("synthetic_previews/chrome_bookmarks.svg"),
+            Self::ChromeFlags => include_str!("synthetic_previews/chrome_flags.svg"),
         }
     }
 }
@@ -114,14 +143,20 @@ pub fn product_from_synthetic_url(url: &str) -> Option<GoogleProduct> {
         .and_then(GoogleProduct::from_key)
 }
 
-/// Pick the artwork for a page, or `None` if it isn't one of the Google apps we have art for.
+/// Pick the artwork for a page, or `None` if it isn't one of the Google apps or `chrome://` pages
+/// we have art for.
 ///
-/// Matches `google.<tld>` and its subdomains (`mail.google.com`, `www.google.co.uk`, …) plus the
-/// workspace editors living under `docs.google.com/<kind>` and `google.com/maps`. Deliberately
-/// strict: a Google host we don't recognise (Chromium infra, Web Store, Groups, Sites, Support,
-/// Accounts, docs/marketing sites, …) gets no fake page — a wrong preview is worse than the
-/// honest favicon placeholder.
+/// Matches common built-in `chrome://` pages (`extensions`, `settings`, `newtab`, `history`,
+/// `downloads`, `bookmarks`, `flags`, …) as well as `google.<tld>` and its subdomains
+/// (`mail.google.com`, `www.google.co.uk`, …) plus the workspace editors living under
+/// `docs.google.com/<kind>` and `google.com/maps`. Deliberately strict: a host we don't recognise
+/// (Chromium infra, Web Store, Groups, Sites, Support, Accounts, docs/marketing sites, …) gets no
+/// fake page — a wrong preview is worse than the honest favicon placeholder.
 pub fn google_product_for_url(page_url: &str) -> Option<GoogleProduct> {
+    if let Some(chrome_page) = chrome_internal_page_for_url(page_url) {
+        return Some(chrome_page);
+    }
+
     let (host, path) = split_host_path(page_url)?;
     let host = host.to_ascii_lowercase();
     let path = path.to_ascii_lowercase();
@@ -160,6 +195,28 @@ pub fn google_product_for_url(page_url: &str) -> Option<GoogleProduct> {
         "" | "www" if is_home_or_search => GoogleProduct::Search,
         _ => return None,
     })
+}
+
+/// Match common built-in `chrome://<page>` URLs (case-insensitive) to synthetic preview artwork.
+fn chrome_internal_page_for_url(url: &str) -> Option<GoogleProduct> {
+    let trimmed = url.trim();
+    const SCHEME: &str = "chrome://";
+    if trimmed.len() < SCHEME.len() || !trimmed[..SCHEME.len()].eq_ignore_ascii_case(SCHEME) {
+        return None;
+    }
+    let rest = &trimmed[SCHEME.len()..];
+    let host = rest.split(['/', '?', '#']).next()?.to_ascii_lowercase();
+    match host.as_str() {
+        "extensions" => Some(GoogleProduct::ChromeExtensions),
+        "settings" | "password-manager" => Some(GoogleProduct::ChromeSettings),
+        "newtab" | "new-tab-page" | "new-tab-page-third-party" => Some(GoogleProduct::ChromeNewTab),
+        "history" => Some(GoogleProduct::ChromeHistory),
+        "downloads" => Some(GoogleProduct::ChromeDownloads),
+        "bookmarks" => Some(GoogleProduct::ChromeBookmarks),
+        "flags" | "inspect" | "version" | "policy" | "gpu" | "net-internals" | "system"
+        | "components" => Some(GoogleProduct::ChromeFlags),
+        _ => None,
+    }
 }
 
 /// `"https://mail.google.com/mail/u/0/#inbox"` → `("mail.google.com", "/mail/u/0/")`.
@@ -270,7 +327,30 @@ mod tests {
             ("https://google.example.com/", None),
             ("https://notgoogle.com/", None),
             ("https://www.youtube.com/watch?v=x", None),
-            ("chrome://extensions", None),
+            // Built-in chrome:// pages
+            ("chrome://extensions", Some(ChromeExtensions)),
+            ("chrome://extensions/", Some(ChromeExtensions)),
+            ("chrome://extensions/?id=abcdef", Some(ChromeExtensions)),
+            ("CHROME://EXTENSIONS/shortcuts", Some(ChromeExtensions)),
+            ("chrome://settings", Some(ChromeSettings)),
+            ("chrome://settings/passwords", Some(ChromeSettings)),
+            ("chrome://password-manager/passwords", Some(ChromeSettings)),
+            ("chrome://newtab", Some(ChromeNewTab)),
+            ("chrome://newtab/", Some(ChromeNewTab)),
+            ("chrome://new-tab-page", Some(ChromeNewTab)),
+            ("chrome://new-tab-page-third-party", Some(ChromeNewTab)),
+            ("chrome://history", Some(ChromeHistory)),
+            ("chrome://history/syncedTabs", Some(ChromeHistory)),
+            ("chrome://downloads", Some(ChromeDownloads)),
+            ("chrome://downloads/", Some(ChromeDownloads)),
+            ("chrome://bookmarks", Some(ChromeBookmarks)),
+            ("chrome://bookmarks/?id=1", Some(ChromeBookmarks)),
+            ("chrome://flags", Some(ChromeFlags)),
+            ("chrome://flags/#enable-gpu-rasterization", Some(ChromeFlags)),
+            ("chrome://inspect/#devices", Some(ChromeFlags)),
+            ("chrome://version", Some(ChromeFlags)),
+            ("chrome://policy", Some(ChromeFlags)),
+            ("chrome://unknown-internal-page", None),
             ("", None),
         ];
         for (url, expected) in cases {

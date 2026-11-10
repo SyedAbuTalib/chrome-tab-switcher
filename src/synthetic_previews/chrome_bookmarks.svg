@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 266 156" width="532" height="312">
+  <rect x="0" y="0" width="266" height="156" fill="#F8F9FA"/>
+  <rect x="0" y="0" width="266" height="18" fill="#FFFFFF"/>
+  <line x1="0" y1="18" x2="266" y2="18" stroke="#E8EAED" stroke-width="1"/>
+  <!-- Bookmark ribbon icon -->
+  <path d="M 9 4 L 15 4 L 15 14 L 12 11.8 L 9 14 Z" fill="#1A73E8"/>
+  <rect x="22" y="7" width="34" height="4" rx="2" fill="#202124"/>
+  <!-- Search bookmarks pill -->
+  <rect x="76" y="4" width="114" height="10" rx="5" fill="#F1F3F4"/>
+  <circle cx="83" cy="9" r="2.2" fill="#5F6368"/>
+  <rect x="89" y="7.5" width="48" height="3" rx="1.5" fill="#9AA0A6"/>
+  <!-- Left folder tree -->
+  <rect x="6" y="26" width="56" height="11" rx="5.5" fill="#E8F0FE"/>
+  <rect x="11" y="29" width="7" height="5" rx="1" fill="#1A73E8"/>
+  <rect x="21" y="30" width="34" height="3" rx="1.5" fill="#1A73E8"/>
+  <rect x="15" y="42" width="7" height="5" rx="1" fill="#5F6368"/>
+  <rect x="25" y="43" width="28" height="3" rx="1.5" fill="#5F6368"/>
+  <rect x="15" y="54" width="7" height="5" rx="1" fill="#5F6368"/>
+  <rect x="25" y="55" width="24" height="3" rx="1.5" fill="#5F6368"/>
+  <rect x="11" y="67" width="7" height="5" rx="1" fill="#5F6368"/>
+  <rect x="21" y="68" width="34" height="3" rx="1.5" fill="#5F6368"/>
+  <rect x="11" y="80" width="7" height="5" rx="1" fill="#5F6368"/>
+  <rect x="21" y="81" width="30" height="3" rx="1.5" fill="#5F6368"/>
+  <!-- Main bookmarks list card -->
+  <rect x="70" y="25" width="182" height="123" rx="6" fill="#FFFFFF" stroke="#DADCE0"/>
+  <!-- Folder row 1 -->
+  <rect x="80" y="34" width="9" height="7" rx="1.5" fill="#FBBC04"/>
+  <rect x="95" y="36" width="46" height="3.5" rx="1.7" fill="#202124"/>
+  <circle cx="242" cy="37.5" r="1.5" fill="#9AA0A6"/>
+  <!-- Folder row 2 -->
+  <rect x="80" y="50" width="9" height="7" rx="1.5" fill="#FBBC04"/>
+  <rect x="95" y="52" width="38" height="3.5" rx="1.7" fill="#202124"/>
+  <circle cx="242" cy="53.5" r="1.5" fill="#9AA0A6"/>
+  <!-- Bookmark item 1 -->
+  <circle cx="84.5" cy="69" r="4" fill="#4285F4"/>
+  <rect x="95" y="67" width="64" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="165" y="67.5" width="48" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="242" cy="69" r="1.5" fill="#9AA0A6"/>
+  <!-- Bookmark item 2 (selected row) -->
+  <rect x="74" y="78" width="174" height="14" rx="4" fill="#E8F0FE"/>
+  <circle cx="84.5" cy="85" r="4" fill="#EA4335"/>
+  <rect x="95" y="83" width="72" height="3.5" rx="1.7" fill="#1A73E8"/>
+  <rect x="173" y="83.5" width="42" height="3" rx="1.5" fill="#1A73E8"/>
+  <circle cx="242" cy="85" r="1.5" fill="#1A73E8"/>
+  <!-- Bookmark item 3 -->
+  <circle cx="84.5" cy="101" r="4" fill="#34A853"/>
+  <rect x="95" y="99" width="58" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="159" y="99.5" width="52" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="242" cy="101" r="1.5" fill="#9AA0A6"/>
+  <!-- Bookmark item 4 -->
+  <circle cx="84.5" cy="117" r="4" fill="#A142F4"/>
+  <rect x="95" y="115" width="68" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="169" y="115.5" width="40" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="242" cy="117" r="1.5" fill="#9AA0A6"/>
+  <!-- Bookmark item 5 -->
+  <circle cx="84.5" cy="133" r="4" fill="#24C1E0"/>
+  <rect x="95" y="131" width="52" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="153" y="131.5" width="46" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="242" cy="133" r="1.5" fill="#9AA0A6"/>
+</svg>

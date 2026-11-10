@@ -147,12 +147,11 @@ if [[ "$HAD_PERSISTENT_CERT" -eq 0 ]] || [[ "${1:-}" == "--reset-tcc" ]]; then
     tccutil reset Accessibility "$PLIST_LABEL" 2>/dev/null || true
 fi
 
-# Reload the LaunchAgent in the user's GUI session
-if ! launchctl kickstart -k "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null; then
-    launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || true
-    sleep 0.5
-    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
-fi
+# Reload the LaunchAgent in the user's GUI session (bootout + bootstrap refreshes launchd's
+# cached Lightweight Code Requirement after replacing and re-signing the binary).
+launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || true
+sleep 0.5
+launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
 
 echo ""
 echo "✅ Installed and started ${PLIST_LABEL} (signed with '${CERT_NAME}')!"

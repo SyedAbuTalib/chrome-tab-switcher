@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 266 156" width="532" height="312">
+  <rect x="0" y="0" width="266" height="156" fill="#F8F9FA"/>
+  <rect x="0" y="0" width="266" height="18" fill="#FFFFFF"/>
+  <line x1="0" y1="18" x2="266" y2="18" stroke="#E8EAED" stroke-width="1"/>
+  <!-- History clock icon -->
+  <circle cx="12" cy="9" r="5" fill="#1A73E8"/>
+  <line x1="12" y1="6.5" x2="12" y2="9.2" stroke="#FFFFFF" stroke-width="1.4"/>
+  <line x1="12" y1="9.2" x2="14.2" y2="10.5" stroke="#FFFFFF" stroke-width="1.4"/>
+  <rect x="22" y="7" width="26" height="4" rx="2" fill="#202124"/>
+  <!-- Search history pill -->
+  <rect x="76" y="4" width="114" height="10" rx="5" fill="#F1F3F4"/>
+  <circle cx="83" cy="9" r="2.2" fill="#5F6368"/>
+  <rect x="89" y="7.5" width="44" height="3" rx="1.5" fill="#9AA0A6"/>
+  <!-- Left sidebar -->
+  <rect x="6" y="26" width="54" height="11" rx="5.5" fill="#E8F0FE"/>
+  <circle cx="13" cy="31.5" r="2.5" fill="#1A73E8"/>
+  <rect x="19" y="30" width="34" height="3" rx="1.5" fill="#1A73E8"/>
+  <circle cx="13" cy="45.5" r="2.5" fill="#5F6368"/>
+  <rect x="19" y="44" width="38" height="3" rx="1.5" fill="#5F6368"/>
+  <circle cx="13" cy="59.5" r="2.5" fill="#5F6368"/>
+  <rect x="19" y="58" width="36" height="3" rx="1.5" fill="#5F6368"/>
+  <!-- Main history card -->
+  <rect x="70" y="25" width="182" height="123" rx="6" fill="#FFFFFF" stroke="#DADCE0"/>
+  <rect x="80" y="33" width="52" height="4.5" rx="2" fill="#202124"/>
+  <line x1="70" y1="44" x2="252" y2="44" stroke="#E8EAED" stroke-width="1"/>
+  <!-- Row 1 -->
+  <rect x="80" y="51" width="6" height="6" rx="1.2" fill="#FFFFFF" stroke="#9AA0A6"/>
+  <rect x="92" y="52.5" width="14" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="114" cy="54" r="4" fill="#4285F4"/>
+  <rect x="123" y="52" width="68" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="196" y="52.5" width="36" height="3" rx="1.5" fill="#9AA0A6"/>
+  <!-- Row 2 -->
+  <rect x="80" y="67" width="6" height="6" rx="1.2" fill="#FFFFFF" stroke="#9AA0A6"/>
+  <rect x="92" y="68.5" width="14" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="114" cy="70" r="4" fill="#EA4335"/>
+  <rect x="123" y="68" width="58" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="186" y="68.5" width="42" height="3" rx="1.5" fill="#9AA0A6"/>
+  <!-- Row 3 -->
+  <rect x="80" y="83" width="6" height="6" rx="1.2" fill="#1A73E8"/>
+  <rect x="92" y="84.5" width="14" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="114" cy="86" r="4" fill="#34A853"/>
+  <rect x="123" y="84" width="74" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="202" y="84.5" width="32" height="3" rx="1.5" fill="#9AA0A6"/>
+  <!-- Row 4 -->
+  <rect x="80" y="99" width="6" height="6" rx="1.2" fill="#FFFFFF" stroke="#9AA0A6"/>
+  <rect x="92" y="100.5" width="14" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="114" cy="102" r="4" fill="#F29900"/>
+  <rect x="123" y="100" width="52" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="180" y="100.5" width="40" height="3" rx="1.5" fill="#9AA0A6"/>
+  <!-- Row 5 -->
+  <rect x="80" y="115" width="6" height="6" rx="1.2" fill="#FFFFFF" stroke="#9AA0A6"/>
+  <rect x="92" y="116.5" width="14" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="114" cy="118" r="4" fill="#A142F4"/>
+  <rect x="123" y="116" width="64" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="192" y="116.5" width="38" height="3" rx="1.5" fill="#9AA0A6"/>
+  <!-- Row 6 -->
+  <rect x="80" y="131" width="6" height="6" rx="1.2" fill="#FFFFFF" stroke="#9AA0A6"/>
+  <rect x="92" y="132.5" width="14" height="3" rx="1.5" fill="#9AA0A6"/>
+  <circle cx="114" cy="134" r="4" fill="#24C1E0"/>
+  <rect x="123" y="132" width="60" height="3.5" rx="1.7" fill="#202124"/>
+  <rect x="188" y="132.5" width="34" height="3" rx="1.5" fill="#9AA0A6"/>
+</svg>
