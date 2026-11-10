@@ -19,6 +19,20 @@ pub const DAYLIGHT_SUBTITLE_TEXT: u32 = 0x64748B;
 pub const DAYLIGHT_SUBTITLE_SELECTED_TEXT: u32 = 0x3B82F6;
 pub const DAYLIGHT_HIGHLIGHT_TEXT: u32 = 0x2563EB;
 
+/// Frosted-glass surfaces (RGBA). The panel sits on a blurred `NSVisualEffectView`, so every
+/// surface is translucent; what keeps text legible is that fills *stack*: a 55% card footer on
+/// a 48% panel still reads as ~75% white over the blurred backdrop. Screenshots stay opaque and
+/// the selected card/row is the most opaque thing on screen so selection always pops.
+pub const DAYLIGHT_GLASS_PANEL_BG: u32 = 0xF8FAFC7A; // 48%
+pub const DAYLIGHT_GLASS_HEADER_BG: u32 = 0xFFFFFF24; // 14% wash over the panel
+pub const DAYLIGHT_GLASS_BORDER: u32 = 0xE2E8F099; // 60%
+pub const DAYLIGHT_GLASS_CARD_BG: u32 = 0xFFFFFF8C; // 55% — grid card footer
+pub const DAYLIGHT_GLASS_ROW_BG: u32 = 0xFFFFFF66; // 40% — compact list rows
+pub const DAYLIGHT_GLASS_SELECTED_BG: u32 = 0xEFF6FFD9; // 85% — selected card / row
+pub const DAYLIGHT_GLASS_CARD_BORDER: u32 = 0xE2E8F0B3; // 70%
+pub const DAYLIGHT_GLASS_PLACEHOLDER_BG: u32 = 0xF8FAFC99; // 60% — no-preview hero area
+pub const DAYLIGHT_GLASS_PLACEHOLDER_BAR_BG: u32 = 0xF1F5F9A6; // 65% — its faux title bar
+
 /// Compute continuous scrollbar `(thumb_top_px, thumb_height_px)` given the viewport height,
 /// total scrollable content height, current vertical scroll offset (`<= 0.0`), and track height.
 /// Returns `None` when `content_height <= viewport_height` (no scrollbar needed).
@@ -193,12 +207,12 @@ pub fn render_tab_row(
             .h(px(shot_height))
             .flex_none()
             .overflow_hidden()
-            .bg(rgb(0xF8FAFC))
+            .bg(rgba(DAYLIGHT_GLASS_PLACEHOLDER_BG))
             .border_b_1()
             .border_color(if is_selected {
                 rgb(0xBFDBFE)
             } else {
-                rgb(0xE2E8F0)
+                rgba(DAYLIGHT_GLASS_CARD_BORDER)
             })
             .flex()
             .flex_col()
@@ -208,9 +222,9 @@ pub fn render_tab_row(
                     .h(px(22.0))
                     .flex_none()
                     .px_2p5()
-                    .bg(rgb(0xF1F5F9))
+                    .bg(rgba(DAYLIGHT_GLASS_PLACEHOLDER_BAR_BG))
                     .border_b_1()
-                    .border_color(rgb(0xE2E8F0))
+                    .border_color(rgba(DAYLIGHT_GLASS_CARD_BORDER))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -287,15 +301,15 @@ pub fn render_tab_row(
         .rounded(px(12.0))
         .overflow_hidden()
         .bg(if is_selected {
-            rgb(DAYLIGHT_ROW_SELECTED_BG)
+            rgba(DAYLIGHT_GLASS_SELECTED_BG)
         } else {
-            rgb(0xFFFFFF)
+            rgba(DAYLIGHT_GLASS_CARD_BG)
         })
         .border_2()
         .border_color(if is_selected {
             rgb(DAYLIGHT_ROW_SELECTED_BORDER)
         } else {
-            rgb(0xE2E8F0)
+            rgba(DAYLIGHT_GLASS_CARD_BORDER)
         })
         .shadow_sm()
         .flex()
@@ -478,15 +492,15 @@ pub fn render_compact_tab_row(
                 .px_3()
                 .rounded(px(9.0))
                 .bg(if is_selected {
-                    rgb(DAYLIGHT_ROW_SELECTED_BG)
+                    rgba(DAYLIGHT_GLASS_SELECTED_BG)
                 } else {
-                    rgb(0xFFFFFF)
+                    rgba(DAYLIGHT_GLASS_ROW_BG)
                 })
                 .border_1()
                 .border_color(if is_selected {
                     rgb(DAYLIGHT_ROW_SELECTED_BORDER)
                 } else {
-                    rgb(0xE2E8F0)
+                    rgba(DAYLIGHT_GLASS_CARD_BORDER)
                 })
                 .flex()
                 .flex_row()
@@ -623,5 +637,23 @@ mod tests {
         assert_eq!(DAYLIGHT_ROW_SELECTED_BORDER, 0x2563EB);
         assert_eq!(DAYLIGHT_TITLE_TEXT, 0x0F172A);
         assert_eq!(DAYLIGHT_TITLE_SELECTED_TEXT, 0x1D4ED8);
+
+        // Glass surfaces must actually be translucent (alpha < 0xFF). The selected surface must
+        // be the most opaque so selection pops; the panel must stay light enough to read on.
+        let alpha = |rgba: u32| (rgba & 0xFF) as f32 / 255.0;
+        for (name, rgba) in [
+            ("panel", DAYLIGHT_GLASS_PANEL_BG),
+            ("header", DAYLIGHT_GLASS_HEADER_BG),
+            ("border", DAYLIGHT_GLASS_BORDER),
+            ("card", DAYLIGHT_GLASS_CARD_BG),
+            ("row", DAYLIGHT_GLASS_ROW_BG),
+            ("selected", DAYLIGHT_GLASS_SELECTED_BG),
+            ("placeholder", DAYLIGHT_GLASS_PLACEHOLDER_BG),
+        ] {
+            assert!(alpha(rgba) < 1.0, "{name} glass surface should be translucent");
+        }
+        assert!((0.35..0.7).contains(&alpha(DAYLIGHT_GLASS_PANEL_BG)));
+        assert!(alpha(DAYLIGHT_GLASS_SELECTED_BG) > alpha(DAYLIGHT_GLASS_CARD_BG));
+        assert!(alpha(DAYLIGHT_GLASS_CARD_BG) > alpha(DAYLIGHT_GLASS_ROW_BG));
     }
 }

@@ -11,7 +11,10 @@ use crate::favicon::FaviconService;
 use crate::hotkey::HotkeyEvent;
 use crate::macos;
 use crate::store::{ScoredTab, TabEntry, TabStore, clean_display_url};
-use crate::ui::row::{compute_scrollbar_metrics, render_compact_tab_row, render_tab_row};
+use crate::ui::row::{
+    DAYLIGHT_GLASS_BORDER, DAYLIGHT_GLASS_HEADER_BG, DAYLIGHT_GLASS_PANEL_BG,
+    compute_scrollbar_metrics, render_compact_tab_row, render_tab_row,
+};
 use crate::ui::{
     COMPACT_PADDING_Y, COMPACT_ROW_HEIGHT, EMPTY_STATE_HEIGHT, GRID_COLUMNS, GRID_GAP,
     GRID_PADDING_Y, HEADER_HEIGHT, MAX_PANEL_HEIGHT, PANEL_WIDTH, ROW_HEIGHT,
@@ -612,9 +615,9 @@ impl Render for SwitcherView {
             .flex_row()
             .items_center()
             .justify_between()
-            .bg(rgb(0xFFFFFF))
+            .bg(rgba(DAYLIGHT_GLASS_HEADER_BG))
             .border_b_1()
-            .border_color(rgb(0xE2E8F0))
+            .border_color(rgba(DAYLIGHT_GLASS_BORDER))
             .child(
                 div()
                     .flex_1()
@@ -930,12 +933,13 @@ impl Render for SwitcherView {
             .flex_none()
             .flex()
             .flex_col()
-            .bg(rgba(0xF8FAFCF5))
+            .bg(rgba(DAYLIGHT_GLASS_PANEL_BG))
             .border_1()
-            .border_color(rgb(0xE2E8F0))
-            .rounded(px(16.0))
+            .border_color(rgba(DAYLIGHT_GLASS_BORDER))
+            .rounded(px(macos::PANEL_CORNER_RADIUS as f32))
             .overflow_hidden()
-            .shadow_lg()
+            // No GPUI shadow here: the NSWindow casts a native one shaped by this card
+            // (see `macos::configure_floating_panel`).
             .child(header)
             .child(body_element);
 

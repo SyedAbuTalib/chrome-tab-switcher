@@ -22,8 +22,12 @@ use crate::hotkey::HotkeyEvent;
 
 static STATUS_BAR_HOTKEY_TX: OnceLock<Sender<HotkeyEvent>> = OnceLock::new();
 static PANEL_WINDOW_PTR: AtomicUsize = AtomicUsize::new(0);
+static BLUR_VIEW_PTR: AtomicUsize = AtomicUsize::new(0);
 static VISIBLE_PANEL_FRAME: RwLock<Option<ScreenRect>> = RwLock::new(None);
 static ACTIVE_CARD_HEIGHT: AtomicUsize = AtomicUsize::new(492);
+
+/// Corner radius of the GPUI card; the frosted-glass backdrop is clipped to match.
+pub const PANEL_CORNER_RADIUS: f64 = 16.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenRect {
@@ -274,15 +278,107 @@ pub fn configure_floating_panel() {
             window.setStyleMask_(current_mask | non_activating);
             window.setLevel_(101); // NSPopUpMenuWindowLevel
             window.setOpaque_(NO);
-            window.setHasShadow_(NO);
+            // Native shadow, derived by WindowServer from the rendered content — i.e. the rounded
+            // glass card, since the blurred backdrop below is opaque in the window's own buffer
+            // and the slack under a short card stays fully transparent. This needs a
+            // near-invisible background rather than `clearColor`, which makes AppKit draw no
+            // shadow (or a rectangular one for the whole frame).
+            window.setHasShadow_(YES);
             window.setCollectionBehavior_(
                 NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
                     | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
                     | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle,
             );
-            let clear_color: id = msg_send![class!(NSColor), clearColor];
-            window.setBackgroundColor_(clear_color);
+            let shadow_safe_clear: id = msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: 0.0f64
+                green: 0.0f64
+                blue: 0.0f64
+                alpha: 0.0001f64
+            ];
+            window.setBackgroundColor_(shadow_safe_clear);
+            configure_blur_backdrop(window);
         }
+    }
+}
+
+/// Ask WindowServer to recompute the shadow from the current content. The immediate pass covers
+/// the common case; the delayed pass runs after GPUI has presented the frame that changed the
+/// card's size, so the shadow never lags a resize.
+unsafe fn invalidate_panel_shadow(window: id) {
+    unsafe {
+        let _: () = msg_send![window, invalidateShadow];
+        let _: () = msg_send![
+            window,
+            performSelector: sel!(invalidateShadow)
+            withObject: nil
+            afterDelay: 0.06f64
+        ];
+    }
+}
+
+/// GPUI's `WindowBackgroundAppearance::Blurred` adds an `NSVisualEffectView` spanning the whole
+/// content view. Our window is always `MAX_PANEL_HEIGHT` tall with the card top-anchored
+/// inside it, so left alone the blur would show up as a square-cornered frosted rectangle
+/// below a short card. Clip it to the card's corner radius and pin it to the card's rect.
+unsafe fn configure_blur_backdrop(window: id) {
+    unsafe {
+        let content_view: id = msg_send![window, contentView];
+        if content_view == nil {
+            return;
+        }
+        let subviews: id = msg_send![content_view, subviews];
+        if subviews == nil {
+            return;
+        }
+        let count = NSArray::count(subviews);
+        for i in 0..count {
+            let view: id = NSArray::objectAtIndex(subviews, i);
+            if view == nil {
+                continue;
+            }
+            let is_effect_view: BOOL =
+                msg_send![view, isKindOfClass: class!(NSVisualEffectView)];
+            if is_effect_view != YES {
+                continue;
+            }
+            let _: () = msg_send![view, setAutoresizingMask: 0u64];
+            let _: () = msg_send![view, setWantsLayer: YES];
+            let layer: id = msg_send![view, layer];
+            if layer != nil {
+                let _: () = msg_send![layer, setCornerRadius: PANEL_CORNER_RADIUS];
+                let _: () = msg_send![layer, setMasksToBounds: YES];
+            }
+            BLUR_VIEW_PTR.store(view as usize, Ordering::Release);
+            sync_blur_backdrop_to_card(ACTIVE_CARD_HEIGHT.load(Ordering::Acquire) as f64);
+            return;
+        }
+    }
+}
+
+/// Resize the frosted backdrop to the card's top-anchored rect (AppKit origin is bottom-left).
+fn sync_blur_backdrop_to_card(card_height: f64) {
+    let view_ptr = BLUR_VIEW_PTR.load(Ordering::Acquire);
+    if view_ptr == 0 {
+        return;
+    }
+    unsafe {
+        let Some(window) = primary_panel_window() else {
+            return;
+        };
+        let content_view: id = msg_send![window, contentView];
+        if content_view == nil {
+            return;
+        }
+        let bounds: NSRect = msg_send![content_view, bounds];
+        let height = card_height.clamp(1.0, bounds.size.height);
+        let frame = NSRect::new(
+            NSPoint::new(0.0, bounds.size.height - height),
+            NSSize::new(bounds.size.width, height),
+        );
+        let _: () = msg_send![view_ptr as id, setFrame: frame];
+        // The card's silhouette just changed, so the shadow must be re-derived too.
+        invalidate_panel_shadow(window);
     }
 }
 
@@ -311,6 +407,7 @@ pub fn show_floating_panel(panel_width: f64, panel_height: f64) {
             let _: () = msg_send![window, setFrame: ns_rect display: YES];
             let _: () = msg_send![window, setAlphaValue: 1.0f64];
             let _: () = msg_send![window, orderFrontRegardless];
+            invalidate_panel_shadow(window);
         }
     }
 }
@@ -334,7 +431,13 @@ pub fn update_floating_panel_size(panel_width: f64, panel_height: f64) {
 /// Record the rendered height of the visible switcher card inside the GPUI window so clicks in
 /// empty space below a shorter card are also treated as outside clicks.
 pub fn set_active_card_height(card_height: f64) {
-    ACTIVE_CARD_HEIGHT.store(card_height.round().max(1.0) as usize, Ordering::Release);
+    let rounded = card_height.round().max(1.0) as usize;
+    let previous = ACTIVE_CARD_HEIGHT.swap(rounded, Ordering::AcqRel);
+    // Called from GPUI's render pass on the main thread; only touch AppKit when the card
+    // actually changed size (grid <-> compact list, result count changes).
+    if previous != rounded {
+        sync_blur_backdrop_to_card(rounded as f64);
+    }
 }
 
 /// Compute the AppKit screen rectangle of the top-anchored switcher card within `window_rect`.

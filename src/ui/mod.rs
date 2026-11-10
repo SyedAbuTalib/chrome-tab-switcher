@@ -137,7 +137,9 @@ pub fn open_prewarmed_switcher_window(
             is_movable: false,
             is_resizable: false,
             is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Transparent,
+            // Frosted glass: GPUI inserts an always-active NSVisualEffectView behind the content.
+            // `macos::configure_floating_panel` pins it to the card and rounds its corners.
+            window_background: WindowBackgroundAppearance::Blurred,
             ..Default::default()
         },
         |_window, cx| {
