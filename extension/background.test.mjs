@@ -444,3 +444,121 @@ test("thumbnails refresh on window focus change, on summon (capture_preview), an
   assert.deepEqual(captures, [20, 20, 20]);
   assert.equal(sentMessages.at(-1).type, "tab_preview_updated");
 });
+
+test("tabs in PWA (app-type) windows are never sent to the daemon", async () => {
+  const sentMessages = [];
+  let wsInstance = null;
+  const captured = [];
+  const listeners = {
+    onCreated: [],
+    onUpdated: [],
+    onRemoved: [],
+    onActivated: [],
+    onAttached: [],
+    onFocusChanged: [],
+    onWindowRemoved: [],
+  };
+
+  // Window 10 is a regular browser window, window 20 is an installed PWA.
+  const windowTypes = { 10: "normal", 20: "app" };
+  const tabs = {
+    101: { id: 101, windowId: 10, index: 0, title: "Docs", url: "https://docs.rs", active: true },
+    201: { id: 201, windowId: 20, index: 0, title: "Chat PWA", url: "https://chat.example", active: true },
+  };
+
+  const mockChrome = {
+    storage: {
+      local: {
+        get: async () => ({ profile_id: "prof-uuid-1", profile_name: "Work" }),
+        set: async () => {},
+      },
+    },
+    tabs: {
+      query: async (filter = {}) =>
+        Object.values(tabs).filter(
+          (t) =>
+            (filter.windowId === undefined || t.windowId === filter.windowId) &&
+            (filter.active === undefined || t.active === filter.active) &&
+            (!filter.lastFocusedWindow || t.windowId === 20)
+        ),
+      get: async (tabId) => tabs[tabId],
+      captureVisibleTab: async (windowId) => {
+        captured.push(windowId);
+        return "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+      },
+      onCreated: { addListener: (fn) => listeners.onCreated.push(fn) },
+      onUpdated: { addListener: (fn) => listeners.onUpdated.push(fn) },
+      onRemoved: { addListener: (fn) => listeners.onRemoved.push(fn) },
+      onActivated: { addListener: (fn) => listeners.onActivated.push(fn) },
+      onAttached: { addListener: (fn) => listeners.onAttached.push(fn) },
+    },
+    windows: {
+      WINDOW_ID_NONE: -1,
+      get: async (windowId) => {
+        if (!(windowId in windowTypes)) throw new Error("No window with id");
+        return { id: windowId, type: windowTypes[windowId], focused: true };
+      },
+      onFocusChanged: { addListener: (fn) => listeners.onFocusChanged.push(fn) },
+      onRemoved: { addListener: (fn) => listeners.onWindowRemoved.push(fn) },
+    },
+  };
+
+  class MockWebSocket {
+    static OPEN = 1;
+    constructor() {
+      this.readyState = MockWebSocket.OPEN;
+      wsInstance = this;
+    }
+    send(data) {
+      sentMessages.push(JSON.parse(data));
+    }
+  }
+
+  const controller = createBridgeController({
+    chromeApi: mockChrome,
+    WebSocketImpl: MockWebSocket,
+    nowFn: () => 1700000005000,
+    enableKeepaliveTimer: false,
+  });
+  await controller.start();
+  await wsInstance.onopen();
+
+  // Snapshot lists only the normal-window tab, and only that window is photographed.
+  assert.equal(sentMessages[0].type, "snapshot");
+  assert.deepEqual(
+    sentMessages[0].tabs.map((t) => t.tab_id),
+    [101]
+  );
+  assert.deepEqual(captured, [10]);
+
+  // Nothing the PWA window does reaches the daemon.
+  const before = sentMessages.length;
+  await listeners.onCreated[0]({ id: 202, windowId: 20, index: 1, title: "PWA 2", url: "https://chat.example/2" });
+  await listeners.onUpdated[0](201, { status: "complete" }, tabs[201]);
+  await listeners.onActivated[0]({ tabId: 201, windowId: 20 });
+  await listeners.onFocusChanged[0](20);
+  await wsInstance.onmessage({ data: JSON.stringify({ type: "capture_preview" }) });
+  assert.equal(sentMessages.length, before);
+  assert.deepEqual(captured, [10]);
+
+  // Normal windows still work.
+  await listeners.onCreated[0]({ id: 102, windowId: 10, index: 1, title: "New", url: "https://a.example" });
+  assert.equal(sentMessages.at(-1).type, "tab_upserted");
+  assert.equal(sentMessages.at(-1).tab.tab_id, 102);
+
+  // "Open in app": a tab moved into the PWA window disappears from the switcher...
+  tabs[101].windowId = 20;
+  await listeners.onAttached[0](101, { newWindowId: 20, newPosition: 1 });
+  assert.deepEqual(sentMessages.at(-1), {
+    type: "tab_removed",
+    profile_id: "prof-uuid-1",
+    tab_id: 101,
+  });
+
+  // ...and "Open in Chrome" brings a PWA tab back.
+  tabs[201].windowId = 10;
+  await listeners.onAttached[0](201, { newWindowId: 10, newPosition: 1 });
+  assert.equal(sentMessages.at(-1).type, "tab_upserted");
+  assert.equal(sentMessages.at(-1).tab.tab_id, 201);
+  assert.equal(sentMessages.at(-1).tab.window_id, 10);
+});

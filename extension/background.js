@@ -111,6 +111,48 @@ export function createBridgeController({
   let captureInFlight = false;
   let lastCaptureTimeMs = 0;
 
+  // ---- PWA / app-window exclusion ------------------------------------------------------------
+  // Installed web apps (PWAs) run in their own Chrome windows of type "app". They are separate
+  // apps as far as the user is concerned, so their tabs never reach the daemon. A window's type
+  // is fixed for its lifetime, which makes it safe to cache per window id.
+  const ALL_WINDOW_TYPES = ["normal", "popup", "panel", "app", "devtools"];
+  const appWindowCache = new Map(); // windowId -> true if the window is a PWA/app window
+
+  async function lookupIsAppWindow(windowId) {
+    try {
+      const win = await chromeApi.windows.get(windowId, {
+        windowTypes: ALL_WINDOW_TYPES,
+      });
+      const isApp = Boolean(win && win.type === "app");
+      appWindowCache.set(windowId, isApp);
+      return isApp;
+    } catch (_err) {
+      return false; // window is gone; nothing to hide
+    }
+  }
+
+  /**
+   * Run `fn` unless `windowId` is a PWA window. Synchronous when the window's type is already
+   * known, so event ordering towards the daemon is preserved in the common case.
+   */
+  function unlessAppWindow(windowId, fn) {
+    if (
+      typeof windowId !== "number" ||
+      windowId < 0 ||
+      !chromeApi.windows ||
+      typeof chromeApi.windows.get !== "function"
+    ) {
+      return fn();
+    }
+    const known = appWindowCache.get(windowId);
+    if (known !== undefined) {
+      return known ? undefined : fn();
+    }
+    return lookupIsAppWindow(windowId).then((isApp) =>
+      isApp ? undefined : fn()
+    );
+  }
+
   function sendJson(payload) {
     if (ws && ws.readyState === WebSocketImpl.OPEN) {
       try {
@@ -362,7 +404,9 @@ export function createBridgeController({
       });
       const tab = tabs && tabs[0];
       if (tab && typeof tab.windowId === "number") {
-        await requestCapture(tab.windowId, { delayMs: 0 });
+        await unlessAppWindow(tab.windowId, () =>
+          requestCapture(tab.windowId, { delayMs: 0 })
+        );
       }
     } catch (_err) {
       // No focused window (e.g. Chrome in background with no windows).
@@ -372,7 +416,11 @@ export function createBridgeController({
   async function sendSnapshot() {
     if (!profileId) return;
     const allTabs = await chromeApi.tabs.query({});
-    const validTabs = allTabs.filter((t) => typeof t.id === "number");
+    const validTabs = [];
+    for (const t of allTabs) {
+      if (typeof t.id !== "number") continue;
+      await unlessAppWindow(t.windowId, () => validTabs.push(t));
+    }
     const wireTabs = validTabs.map((t) =>
       serializeChromeTab(t, tabPreviews.get(t.id) ?? null)
     );
@@ -520,29 +568,64 @@ export function createBridgeController({
 
     chromeApi.tabs.onCreated.addListener((tab) => {
       if (typeof tab.id !== "number") return;
-      sendJson({
-        type: "tab_upserted",
-        profile_id: profileId,
-        tab: serializeChromeTab(tab, tabPreviews.get(tab.id) ?? null),
+      return unlessAppWindow(tab.windowId, () => {
+        sendJson({
+          type: "tab_upserted",
+          profile_id: profileId,
+          tab: serializeChromeTab(tab, tabPreviews.get(tab.id) ?? null),
+        });
       });
     });
 
     chromeApi.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
       if (!tab || typeof tab.id !== "number") return;
-      sendJson({
-        type: "tab_upserted",
-        profile_id: profileId,
-        tab: serializeChromeTab(tab, tabPreviews.get(tab.id) ?? null),
+      return unlessAppWindow(tab.windowId, () => {
+        sendJson({
+          type: "tab_upserted",
+          profile_id: profileId,
+          tab: serializeChromeTab(tab, tabPreviews.get(tab.id) ?? null),
+        });
+        if (
+          tab.active &&
+          typeof tab.windowId === "number" &&
+          changeInfo &&
+          changeInfo.status === "complete"
+        ) {
+          requestCapture(tab.windowId);
+        }
       });
-      if (
-        tab.active &&
-        typeof tab.windowId === "number" &&
-        changeInfo &&
-        changeInfo.status === "complete"
-      ) {
-        requestCapture(tab.windowId);
-      }
     });
+
+    // A tab can cross the PWA boundary without being closed: "Open in Chrome" moves it from an
+    // app window into a normal one, "Open in app" does the reverse.
+    if (chromeApi.tabs.onAttached) {
+      chromeApi.tabs.onAttached.addListener(async (tabId, attachInfo) => {
+        const windowId = attachInfo && attachInfo.newWindowId;
+        let shown = false;
+        await unlessAppWindow(windowId, () => {
+          shown = true;
+        });
+        if (!shown) {
+          sendJson({
+            type: "tab_removed",
+            profile_id: profileId,
+            tab_id: tabId,
+          });
+          return;
+        }
+        try {
+          const tab = await chromeApi.tabs.get(tabId);
+          if (!tab || typeof tab.id !== "number") return;
+          sendJson({
+            type: "tab_upserted",
+            profile_id: profileId,
+            tab: serializeChromeTab(tab, tabPreviews.get(tab.id) ?? null),
+          });
+        } catch (_err) {
+          // Tab closed while it was being moved.
+        }
+      });
+    }
 
     chromeApi.tabs.onRemoved.addListener((tabId) => {
       tabPreviews.delete(tabId);
@@ -554,16 +637,18 @@ export function createBridgeController({
       });
     });
 
-    chromeApi.tabs.onActivated.addListener(async (activeInfo) => {
-      sendJson({
-        type: "tab_activated",
-        profile_id: profileId,
-        window_id: activeInfo.windowId,
-        tab_id: activeInfo.tabId,
-        timestamp_ms: nowFn(),
-      });
-      await requestCapture(activeInfo.windowId);
-    });
+    chromeApi.tabs.onActivated.addListener((activeInfo) =>
+      unlessAppWindow(activeInfo.windowId, () => {
+        sendJson({
+          type: "tab_activated",
+          profile_id: profileId,
+          window_id: activeInfo.windowId,
+          tab_id: activeInfo.tabId,
+          timestamp_ms: nowFn(),
+        });
+        return requestCapture(activeInfo.windowId);
+      })
+    );
 
     chromeApi.windows.onFocusChanged.addListener(async (windowId) => {
       if (
@@ -574,6 +659,11 @@ export function createBridgeController({
         return;
       }
       try {
+        let isApp = true;
+        await unlessAppWindow(windowId, () => {
+          isApp = false;
+        });
+        if (isApp) return;
         const tabs = await chromeApi.tabs.query({
           active: true,
           windowId,
@@ -596,6 +686,7 @@ export function createBridgeController({
     });
 
     chromeApi.windows.onRemoved.addListener((windowId) => {
+      appWindowCache.delete(windowId);
       sendJson({
         type: "window_removed",
         profile_id: profileId,
